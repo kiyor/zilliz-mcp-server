@@ -1,12 +1,14 @@
 """Zilliz Control Plane billing tools."""
 
+import json
 import logging
 from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, List, Optional
 from zilliz_mcp_server.common import hints, openapi_client
-from zilliz_mcp_server.app import zilliz_mcp
+from zilliz_mcp_server.app import zilliz_mcp, read_tool
+from zilliz_mcp_server.common.budget import RESULT_BUDGET
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -27,6 +29,11 @@ MAX_INVOICE_PAGE_SIZE = 100
 INVOICE_UNKNOWN_ERROR_CODE = 20011
 
 UNATTRIBUTED = "unattributed"
+
+
+def budget_size(obj: Any) -> int:
+    """Bytes of JSON, as counted against RESULT_BUDGET."""
+    return len(json.dumps(obj))
 
 INVOICE_AMOUNT_UNIT_NOTE = (
     "Invoice amounts are integers in whole units of 'currency' (e.g. USD dollars, not cents), "
@@ -120,7 +127,7 @@ def _format_invoice(invoice: Dict[str, Any]) -> Dict[str, Any]:
     return {field: invoice.get(source) for field, source in _INVOICE_FIELDS.items()}
 
 
-@zilliz_mcp.tool()
+@read_tool()
 async def get_usage_summary(
     start: str,
     end: str,
@@ -288,7 +295,7 @@ async def get_usage_summary(
                                 'cluster_id': cluster_id, 'project_id': project_id}) from e
 
 
-@zilliz_mcp.tool()
+@read_tool()
 async def query_daily_usage(
     start: str,
     end: str,
@@ -391,10 +398,39 @@ async def query_daily_usage(
                     day['items_truncated'] = len(items) - len(shown)
             days.append(day)
 
+        # Keep the result inside the shared response budget: keep line items in date order until
+        # the JSON reaches RESULT_BUDGET; daily totals and by_cost_type always stay.
+        notes = []
+        if filtered and budget_size(days) > RESULT_BUDGET:
+            used = budget_size([{k: v for k, v in d.items() if k != 'items'} for d in days])
+            for day in days:
+                items = day.get('items', [])
+                keep = 0
+                for item in items:
+                    cost = budget_size(item) + 2  # item plus separator
+                    if used + cost > RESULT_BUDGET:
+                        break
+                    used += cost
+                    keep += 1
+                if keep < len(items):
+                    day['items_truncated'] = day.get('items_truncated', 0) + len(items) - keep
+                    day['items'] = items[:keep]
+                    used += len(', "items_truncated": 000000, "items": []')
+            # The running count is an estimate; trim from the end until the real size fits.
+            while budget_size(days) > RESULT_BUDGET:
+                day = next((d for d in reversed(days) if d.get('items')), None)
+                if day is None:
+                    break
+                day['items'].pop()
+                day['items_truncated'] = day.get('items_truncated', 0) + 1
+            notes.append(f"Line items were cut to keep the result under {RESULT_BUDGET // 1000} KB "
+                         f"(see items_truncated per day); daily totals and by_cost_type are "
+                         f"complete. Narrow start/end or filter by cluster_id to see more items.")
+
         # Log results
         logger.info(f"QUERY_DAILY_USAGE RESULT: returned {len(days)} days")
 
-        return hints.ok(days)
+        return hints.ok(days, notes=notes)
 
     except Exception as e:
         logger.error(f"QUERY_DAILY_USAGE ERROR: {str(e)}")
@@ -403,7 +439,7 @@ async def query_daily_usage(
                                 'project_id': project_id}) from e
 
 
-@zilliz_mcp.tool()
+@read_tool()
 async def list_invoices(page_size: int = 10, current_page: int = 1) -> str:
     """
     List the organization's invoices in Zilliz Cloud. Requires an API key belonging to
@@ -497,7 +533,7 @@ async def list_invoices(page_size: int = 10, current_page: int = 1) -> str:
         raise structured from e
 
 
-@zilliz_mcp.tool()
+@read_tool()
 async def describe_invoice(invoice_id: str) -> str:
     """
     Describe one invoice. It returns the same fields as an entry of list_invoices, so prefer

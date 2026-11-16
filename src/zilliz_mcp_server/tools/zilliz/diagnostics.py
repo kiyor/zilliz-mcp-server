@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from zilliz_mcp_server.app import zilliz_mcp
+from zilliz_mcp_server.app import read_tool
 from zilliz_mcp_server.common import hints, openapi_client
 from zilliz_mcp_server.common.hints import step
 
@@ -201,7 +201,7 @@ def health_hints(report: Dict[str, Any], window: str) -> Any:
     return steps, notes
 
 
-@zilliz_mcp.tool()
+@read_tool()
 async def get_cluster_health(cluster_id: str, window: str = "P1D", compare_previous: bool = True) -> str:
     """
     One-call health overview of a cluster: status plus recent CU usage, storage, search/query/insert

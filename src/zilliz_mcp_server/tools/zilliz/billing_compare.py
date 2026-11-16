@@ -11,7 +11,7 @@ from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional, Tuple
 
-from zilliz_mcp_server.app import zilliz_mcp
+from zilliz_mcp_server.app import read_tool
 from zilliz_mcp_server.common import hints, openapi_client
 from zilliz_mcp_server.tools.zilliz.billing_tools import (
     MAX_SUMMARY_DAYS, MAX_RAW_DAYS, UNATTRIBUTED, _decimal, _fetch_usage, _money, _parse_range,
@@ -130,7 +130,7 @@ def _invoice_for(invoices: List[Dict[str, Any]], start: date, end: date) -> Opti
             "total": total("total")}
 
 
-@zilliz_mcp.tool()
+@read_tool()
 async def compare_billing_periods(
     base_start: str,
     base_end: str,

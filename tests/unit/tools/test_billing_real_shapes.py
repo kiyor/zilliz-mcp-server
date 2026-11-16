@@ -61,11 +61,17 @@ class TestUsageSize:
             for it in b["items"]:
                 it["properties"]["projectId"] = "proj-1"
         mock_client.control_plane_api_request.return_value = resp
-        days = json.loads(_call("query_daily_usage", start="2026-11-01", end="2026-11-07",
-                                project_id="proj-1"))["data"]
-        shown = sum(len(d["items"]) for d in days)
-        assert shown == billing_tools.MAX_LINE_ITEMS
+        out = json.loads(_call("query_daily_usage", start="2026-11-01", end="2026-11-07",
+                               project_id="proj-1"))
+        days = out["data"]
+        shown = sum(len(d.get("items", [])) for d in days)
+        assert 0 < shown <= billing_tools.MAX_LINE_ITEMS
         assert sum(d.get("items_truncated", 0) for d in days) == 7 * 400 - shown
+        # Size, not only item count, is capped by the shared budget; totals stay for every day.
+        assert len(json.dumps(days)) <= billing_tools.RESULT_BUDGET
+        assert all("by_cost_type" in d and "total" in d for d in days)
+        if shown < billing_tools.MAX_LINE_ITEMS:
+            assert any("items_truncated" in n for n in out.get("notes", []))
         props = days[0]["items"][0]["properties"]
         assert None not in props.values() and "volumeName" not in props
 
