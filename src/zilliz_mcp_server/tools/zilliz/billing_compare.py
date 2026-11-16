@@ -26,6 +26,9 @@ _FLAT = Decimal("0.02")
 # 10 rows + all new/gone keys was ~10 KB and 380 rows was ~100 KB.
 MAX_TOP_N = 50
 MAX_KEY_LIST = 20
+# List Invoices is paged (pageSize max 100); read up to this many pages for invoice_view.
+INVOICE_PAGE_SIZE = 100
+MAX_INVOICE_PAGES = 3
 
 
 def _key(item: Dict[str, Any], group_by: str) -> str:
@@ -101,16 +104,62 @@ def _driver(b: Dict[str, Any], t: Dict[str, Any]) -> Dict[str, Any]:
             "quantity_pct": _pct(t["quantity"], b["quantity"]), "unit_price_pct": _pct(pt, pb)}
 
 
+def _inv_date(inv: Dict[str, Any], field: str) -> Optional[date]:
+    try:
+        return date.fromisoformat(str(inv.get(field, ""))[:10])
+    except ValueError:
+        return None
+
+
+def _fetch_invoices() -> Tuple[List[Dict[str, Any]], Optional[int], bool]:
+    """Read List Invoices page by page. Returns (invoices, reported count, complete)."""
+    invoices: List[Dict[str, Any]] = []
+    count = None
+    for page in range(1, MAX_INVOICE_PAGES + 1):
+        resp = openapi_client.control_plane_api_request(
+            "/v2/invoices", params_map={"pageSize": INVOICE_PAGE_SIZE, "currentPage": page})
+        data = resp.get("data") or {}
+        batch = data.get("invoices") or []
+        invoices.extend(batch)
+        if isinstance(data.get("count"), int):
+            count = data["count"]
+        if len(batch) < INVOICE_PAGE_SIZE or (count is not None and len(invoices) >= count):
+            return invoices, count, True
+    return invoices, count, False
+
+
+def _invoice_notes(invoices: List[Dict[str, Any]], count: Optional[int], complete: bool,
+                   view: Dict[str, Any], periods: Dict[str, Tuple[date, date]]) -> List[str]:
+    """Explain a null or partial invoice_view instead of leaving it silent."""
+    notes: List[str] = []
+    for side, (start, end) in periods.items():
+        # periodEnd is exclusive on real invoices (next period's first day at 00:00).
+        straddling = [i for i in invoices
+                      if (ps := _inv_date(i, "periodStart")) and (pe := _inv_date(i, "periodEnd"))
+                      and ps < start < pe]
+        if view[side] is None and not straddling:
+            if not complete:
+                notes.append(f"invoice_view.{side} is null: only {len(invoices)} of {count or 'more'} "
+                             f"invoices were read and none starts in {start}..{end}. Use list_invoices "
+                             f"with current_page to find older invoices.")
+            elif invoices:
+                notes.append(f"invoice_view.{side} is null: no invoice's billing period starts in "
+                             f"{start}..{end} (not invoiced yet, or before the organization's first invoice).")
+        elif straddling:
+            notes.append(f"invoice_view.{side} counts only invoices whose billing period STARTS in "
+                         f"{start}..{end}; the invoice that began on "
+                         f"{str(straddling[0].get('periodStart'))[:10]} also covers part of this period "
+                         f"but is not included. Invoices cover whole billing periods, so compare usage "
+                         f"totals for exact date ranges.")
+    return notes[:2]
+
+
 def _invoice_for(invoices: List[Dict[str, Any]], start: date, end: date) -> Optional[Dict[str, Any]]:
-    """Invoices whose billing period starts inside start..end; several are summed."""
-    hits = []
-    for inv in invoices:
-        try:
-            ps = date.fromisoformat(str(inv.get("periodStart", ""))[:10])
-        except ValueError:
-            continue
-        if start <= ps <= end:
-            hits.append(inv)
+    """Invoices whose billing period STARTS inside start..end; several are summed.
+
+    An invoice that began before start is not counted, even if part of it falls in the period.
+    """
+    hits = [inv for inv in invoices if (ps := _inv_date(inv, "periodStart")) and start <= ps <= end]
     if not hits:
         return None
     if len(hits) == 1:
@@ -175,7 +224,11 @@ async def compare_billing_periods(
                           "quantity_pct", "unit_price_pct", "unit"}],
          "new_keys": [...], "gone_keys": [...] (largest 20 each; new_key_count / gone_key_count give totals),
          "invoice_view": {"base": {...}|null, "target": {...}|null} (omitted if invoices are unavailable;
-                          a period spanning several invoices gets their sum with "invoices": <count>)}
+                          an invoice is matched to a period only when its billing period STARTS inside
+                          that period, so for a range that crosses months only the invoices starting
+                          in it count, and an invoice that began earlier is left out (a note says so);
+                          a period with several such invoices gets their sum with "invoices": <count>;
+                          null means none was found, and a note explains why)}
         quantity_effect + price_effect = abs for groups that exist in both periods (same unit).
     """
     ctx = {"base_start": base_start, "base_end": base_end, "target_start": target_start,
@@ -239,10 +292,11 @@ async def compare_billing_periods(
 
         notes: List[str] = []
         try:
-            inv = openapi_client.control_plane_api_request(
-                "/v2/invoices", params_map={"pageSize": 24, "currentPage": 1})
-            invoices = (inv.get("data") or {}).get("invoices") or []
-            result["invoice_view"] = {"base": _invoice_for(invoices, bs, be), "target": _invoice_for(invoices, ts, te)}
+            invoices, inv_count, complete = _fetch_invoices()
+            view = {"base": _invoice_for(invoices, bs, be), "target": _invoice_for(invoices, ts, te)}
+            result["invoice_view"] = view
+            notes.extend(_invoice_notes(invoices, inv_count, complete, view,
+                                        {"base": (bs, be), "target": (ts, te)}))
         except Exception as inv_err:  # usage comparison is still valid without invoices
             notes.append(f"Invoices unavailable ({str(inv_err)[:100]}); amounts are usage before credits.")
         if bdays != tdays:

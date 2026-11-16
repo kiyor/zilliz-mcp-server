@@ -188,3 +188,81 @@ async def test_period_spanning_several_invoices_sums_them():
         out = await _run(target_start="2026-09-01", target_end="2026-10-31")
     t = out["data"]["invoice_view"]["target"]
     assert t["invoices"] == 2 and t["usage_amount"] == 2000.0 and t["statuses"] == ["paid", "unpaid"]
+
+
+def _inv(i, start, end, amount=100):
+    return {"id": f"inv-{i}", "periodStart": f"{start}T00:00:00Z", "periodEnd": f"{end}T23:59:59Z",
+            "status": "paid", "usageAmount": amount, "creditsApplied": 0, "total": amount}
+
+
+@pytest.mark.asyncio
+async def test_invoices_are_paged_until_count_reached():
+    from zilliz_mcp_server.tools.zilliz import billing_compare as bc
+    base = _usage(_item("in01-a", "compute", 1, 1))
+    pages = {1: [_inv(n, "2027-01-01", "2027-01-31") for n in range(bc.INVOICE_PAGE_SIZE)],
+             2: [_inv("09", "2026-09-01", "2026-09-30", 800)]}
+    seen = []
+
+    def fake(uri, params_map=None, body_map=None, method="GET"):
+        if uri == "/v2/invoices":
+            seen.append(params_map["currentPage"])
+            return {"code": 0, "data": {"count": bc.INVOICE_PAGE_SIZE + 1,
+                                        "invoices": pages.get(params_map["currentPage"], [])}}
+        return base
+    with patch(f"{MOD}.openapi_client.control_plane_api_request", side_effect=fake):
+        out = await _run()
+    assert seen == [1, 2]
+    assert out["data"]["invoice_view"]["base"]["invoice_id"] == "inv-09"
+
+
+@pytest.mark.asyncio
+async def test_invoices_beyond_page_cap_give_a_note_not_a_silent_null():
+    from zilliz_mcp_server.tools.zilliz import billing_compare as bc
+    base = _usage(_item("in01-a", "compute", 1, 1))
+    full = {"code": 0, "data": {"count": 999, "invoices": [
+        _inv(n, "2027-01-01", "2027-01-31") for n in range(bc.INVOICE_PAGE_SIZE)]}}
+    with patch(f"{MOD}.openapi_client.control_plane_api_request",
+               side_effect=_client(base, base, invoices=full)) as m:
+        out = await _run()
+    inv_calls = [c for c in m.call_args_list if c.args[0] == "/v2/invoices"]
+    assert len(inv_calls) == bc.MAX_INVOICE_PAGES
+    assert out["data"]["invoice_view"]["base"] is None
+    assert any("invoice_view.base is null" in n and "current_page" in n for n in out["notes"])
+
+
+@pytest.mark.asyncio
+async def test_cross_month_period_counts_only_invoices_starting_in_it():
+    base = _usage(_item("in01-a", "compute", 1, 1))
+    with patch(f"{MOD}.openapi_client.control_plane_api_request", side_effect=_client(base, base)):
+        out = await _run(base_start="2026-09-15", base_end="2026-10-14",
+                         target_start="2026-10-15", target_end="2026-11-13")
+    v = out["data"]["invoice_view"]
+    assert v["base"]["invoice_id"] == "inv-10"  # inv-09 started before 09-15: not counted
+    assert v["target"] is None
+    notes = " ".join(out["notes"])
+    assert "invoice_view.base counts only invoices whose billing period STARTS" in notes
+    assert "2026-09-01" in notes and "invoice_view.target counts only" in notes
+
+
+@pytest.mark.asyncio
+async def test_calendar_months_with_exclusive_period_end_have_no_straddle_note():
+    # Real invoices end at the next period's first day 00:00 (exclusive).
+    inv = {"code": 0, "data": {"count": 2, "invoices": [
+        {"id": "inv-10", "periodStart": "2026-10-01T00:00:00Z", "periodEnd": "2026-11-01T00:00:00Z"},
+        {"id": "inv-09", "periodStart": "2026-09-01T00:00:00Z", "periodEnd": "2026-10-01T00:00:00Z"}]}}
+    base = _usage(_item("in01-a", "compute", 1, 1))
+    with patch(f"{MOD}.openapi_client.control_plane_api_request",
+               side_effect=_client(base, base, invoices=inv)):
+        out = await _run()
+    assert out["data"]["invoice_view"]["base"]["invoice_id"] == "inv-09"
+    assert not any("invoice_view" in n for n in out.get("notes", []))
+
+
+@pytest.mark.asyncio
+async def test_null_invoice_view_is_explained():
+    base = _usage(_item("in01-a", "compute", 1, 1))
+    with patch(f"{MOD}.openapi_client.control_plane_api_request", side_effect=_client(base, base)):
+        out = await _run(base_start="2026-07-01", base_end="2026-07-31",
+                         target_start="2026-08-01", target_end="2026-08-31")
+    assert out["data"]["invoice_view"] == {"base": None, "target": None}
+    assert any("invoice_view.base is null: no invoice" in n for n in out["notes"])
