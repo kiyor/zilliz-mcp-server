@@ -3,7 +3,7 @@
 Every tool returns a JSON text payload (MCP text content) with this shape::
 
     {
-      "data": <the tool's actual result>,
+      "notes": ["..."],                    # optional, short caveats (first: survives truncation)
       "next_steps": [                      # optional, only when informative
         {"tool": "search", "args": {...}, "why": "..."}
       ],
@@ -49,14 +49,19 @@ def step(tool: str, why: str, **args: Any) -> Dict[str, Any]:
 
 def ok(data: Any, next_steps: Optional[List[Dict[str, Any]]] = None,
        notes: Optional[List[str]] = None) -> str:
-    """Serialize a successful tool result in the envelope format."""
-    payload: Dict[str, Any] = {"data": data}
-    steps = [s for s in (next_steps or []) if s][:MAX_NEXT_STEPS]
-    if steps:
-        payload["next_steps"] = steps
+    """Serialize a successful tool result in the envelope format.
+
+    notes and next_steps come BEFORE data: MCP clients often truncate long tool output, and
+    large results (e.g. metric series) would otherwise cut the hints off.
+    """
+    payload: Dict[str, Any] = {}
     kept_notes = [n for n in (notes or []) if n][:MAX_NOTES]
     if kept_notes:
         payload["notes"] = kept_notes
+    steps = [s for s in (next_steps or []) if s][:MAX_NEXT_STEPS]
+    if steps:
+        payload["next_steps"] = steps
+    payload["data"] = data
     return json.dumps(payload)
 
 
