@@ -551,10 +551,10 @@ async def search(
         collection_name: The name of the collection to which this operation applies
         data: A list of vector embeddings. Zilliz Cloud searches for the most similar vector embeddings to the specified ones
         anns_field: The name of the vector field
-        limit: The total number of entities to return (default: 10). The sum of this value and offset should be less than 100
+        limit: The total number of entities to return (default: 10). limit + offset must be at most 16,384
         db_name: The name of the database. Pass explicit dbName or leave empty when cluster is free or serverless
         filter: The filter used to find matches for the search
-        offset: The number of records to skip in the search result. The sum of this value and limit should be less than 16,384
+        offset: The number of records to skip in the search result. limit + offset must be at most 16,384
         grouping_field: The name of the field that serves as the aggregation criteria
         output_fields: An array of fields to return along with the search results. Default returns only
             id and distance. Avoid "*" or vector fields unless you need raw embeddings: a 1024-dim
@@ -562,7 +562,7 @@ async def search(
         metric_type: The name of the metric type that applies to the current search (L2, IP, COSINE)
         search_params: Extra search parameters including radius and range_filter
         partition_names: The name of the partitions to which this operation applies
-        consistency_level: The consistency level of the search operation (Strong, Eventually, Bounded)
+        consistency_level: The consistency level of the search operation (Strong, Session, Bounded, Eventually, Customized; the server default is Bounded)
     Returns:
         JSON {"notes": [...], "next_steps": [{"tool", "args", "why"}], "data": <result>};
         next_steps/notes are present only when useful. On failure the error text is JSON
@@ -688,8 +688,8 @@ async def query(
             non-vector fields are returned (vector fields are left out; name them explicitly, or pass
             ["*"], to get raw embeddings). Results over ~45 KB of JSON are trimmed (see notes).
         partition_names: The name of the partitions to which this operation applies. If not set, the operation applies to all partitions in the collection
-        limit: The total number of entities to return (default: 100). The sum of this value and offset should be less than 16,384
-        offset: The number of records to skip in the search result. The sum of this value and limit should be less than 16,384
+        limit: The total number of entities to return (default: 100). limit + offset must be at most 16,384
+        offset: The number of records to skip in the query result. limit + offset must be at most 16,384
     Returns:
         JSON {"notes": [...], "next_steps": [{"tool", "args", "why"}], "data": <result>};
         next_steps/notes are present only when useful. On failure the error text is JSON
@@ -810,12 +810,12 @@ async def hybrid_search(
             - params: Extra search parameters with radius and range_filter (optional)
         rerank_strategy: The name of the reranking strategy (rrf, weighted)
         rerank_params: Parameters related to the specified strategy (e.g., {"k": 10} for rrf)
-        limit: The total number of entities to return. The sum of this value and offset should be less than 16,384
+        limit: The total number of entities to return after reranking (at most 16,384)
         db_name: The name of the database. Pass explicit dbName or leave empty when cluster is free or serverless
         partition_names: The name of the partitions to which this operation applies
         output_fields: An array of fields to return along with the search results. Avoid vector
             fields unless you need raw embeddings; results over ~45 KB of JSON are trimmed (see notes).
-        consistency_level: The consistency level of the search operation (Strong, Eventually, Bounded)
+        consistency_level: The consistency level of the search operation (Strong, Session, Bounded, Eventually, Customized; the server default is Bounded)
     Returns:
         JSON {"notes": [...], "next_steps": [{"tool", "args", "why"}], "data": <result>};
         next_steps/notes are present only when useful. On failure the error text is JSON
