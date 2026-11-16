@@ -402,7 +402,9 @@ async def query_cluster_metrics(
                 REQ_FAIL_RATE_UPSERT, REQ_FAIL_RATE_DELETE, REQ_FAIL_RATE_SEARCH, REQ_FAIL_RATE_QUERY.
                 There is no overall success/fail rate metric; success rate = 100 - fail rate.
               Data: ENTITIES_COUNT, ENTITIES_LOADED, ENTITIES_INDEXED, COLLECTIONS_COUNT,
-                UNLOADED_COLLECTIONS_COUNT, FLUSH_COUNT (per minute)
+                UNLOADED_COLLECTIONS_COUNT, FLUSH_COUNT (per minute). ENTITIES_COUNT and
+                ENTITIES_LOADED are summed over ALL collections in the cluster, not a
+                per-collection row count; for one collection use describe_collection -> rowCount.
     Returns:
         JSON {"notes": [...], "next_steps": [{"tool", "args", "why"}], "data": <result>};
         next_steps/notes are present only when useful. On failure the error text is JSON
