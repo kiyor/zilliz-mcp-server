@@ -27,6 +27,16 @@ MAX_INVOICE_PAGE_SIZE = 100
 # List Invoices returns this business code ("An unknown error occurred") when pageSize or
 # currentPage is missing.
 INVOICE_UNKNOWN_ERROR_CODE = 20011
+# Observed (one organization, not a documented limit): ranges starting on or after this day
+# returned daily usage; earlier ranges failed with code 3 ("Bad request", no detail) or came back
+# empty. It is NOT enforced locally (other organizations may have older data); it is only used to
+# word the error for code 3 and the note on an empty early result. Invoices go back further.
+EARLIEST_USAGE_DATE = date(2025, 3, 1)
+USAGE_BAD_REQUEST_CODE = 3
+EARLY_EMPTY_NOTE = (
+    "No usage was returned for this range. Ranges before {boundary} were observed to be unavailable "
+    "from the usage API, so empty does not mean zero spend: read invoiced totals with list_invoices "
+    "for those months.")
 
 UNATTRIBUTED = "unattributed"
 
@@ -90,6 +100,45 @@ def _parse_range(start: str, end: str, max_days: int) -> tuple:
     if days > max_days:
         raise ValueError(f"date range is {days} days; the maximum is {max_days} days")
     return start_date, end_date
+
+
+def early_empty_note(start: str, results: List[Dict[str, Any]]) -> Optional[str]:
+    """Note for a range that starts before the observed boundary and returned no line items."""
+    if start >= EARLIEST_USAGE_DATE.isoformat() or any(bucket.get('items') for bucket in results):
+        return None
+    return EARLY_EMPTY_NOTE.format(boundary=EARLIEST_USAGE_DATE)
+
+
+def usage_tool_error(tool: str, exc: Exception, ctx: Dict[str, Any]) -> hints.StructuredToolError:
+    """tool_error for usage tools; the server's bare 'Bad request' (code 3) gets an actionable hint.
+
+    Every code 3 is treated as a possibly unavailable date range: the API gives no reason, and the
+    only cause observed is a range starting too early.
+    ctx must hold the start/end argument names used by the tool (start/end or base_*/target_*).
+    """
+    structured = hints.tool_error(tool, exc, ctx)
+    if getattr(exc, 'code', None) != USAGE_BAD_REQUEST_CODE:
+        return structured
+    boundary = EARLIEST_USAGE_DATE.isoformat()
+    starts = {k: v for k, v in ctx.items() if k.endswith('start') and isinstance(v, str)}
+    early = {k: v for k, v in starts.items() if v[:10] < boundary}
+    field = next(iter(early), next(iter(starts), 'start'))
+    steps = []
+    if early and all(str(ctx.get(k.replace('start', 'end'), '9999')) >= boundary for k in early):
+        retry = {**ctx, **{k: boundary for k in early}}
+        steps.append(hints.step(tool, f"Retry with start moved to {boundary} (observed to work).", **retry))
+    steps.append(hints.step('list_invoices', 'Invoices cover months the usage API does not serve.',
+                            page_size=24, current_page=1))
+    payload = {**structured.payload, 'error': 'INVALID_ARGUMENT', 'field': field, 'got': starts.get(field),
+               'message': (f"The usage API rejected this date range with 'Bad request' and gave no reason. "
+                           f"Observed: earlier dates are not queryable; on the organization tested, usage was "
+                           f"available from {boundary} onward (the limit may differ per organization)."),
+               'expected': f"a range the usage API serves (observed: starting on or after {boundary})",
+               'fix': (f"Read invoiced totals for the requested months with list_invoices, and tell the user "
+                       f"daily usage is not available for that range. If {field} is before {boundary}, "
+                       f"retrying with {field}={boundary} was observed to work."),
+               'next_steps': steps}
+    return hints.StructuredToolError({k: v for k, v in payload.items() if v not in (None, "", [], {})})
 
 
 def _fetch_usage(start: str, end: str, max_days: int) -> List[Dict[str, Any]]:
@@ -159,7 +208,8 @@ async def get_usage_summary(
     possible billing data issue to confirm with Zilliz support rather than explaining it.
 
     Args:
-        start: First day of the range in YYYY-MM-DD format (UTC)
+        start: First day of the range in YYYY-MM-DD format (UTC). Older dates may not be
+            queryable (observed: from 2025-03-01 on); for earlier months use list_invoices
         end: Last day of the range in YYYY-MM-DD format (UTC, inclusive). Maximum range is 366 days.
         group_by: How to group costs: "cluster", "project", "cost_type", "region", "day" or "month" (default: "cluster").
                   For ranges over 92 days prefer "month"; "day" then leaves out each day's by_cost_type.
@@ -250,6 +300,9 @@ async def get_usage_summary(
             if partial:
                 notes.append(f"Partial month(s) {', '.join(sorted(set(partial)))}: only days from {start} to {end} "
                              "are counted, so do not compare them with full months.")
+        empty_note = early_empty_note(start, results)
+        if empty_note:
+            notes.append(empty_note)
 
         def share(amount: Decimal) -> float:
             return float((amount / total * 100).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)) if total else 0.0
@@ -290,7 +343,7 @@ async def get_usage_summary(
 
     except Exception as e:
         logger.error(f"GET_USAGE_SUMMARY ERROR: {str(e)}")
-        raise hints.tool_error("get_usage_summary", e,
+        raise usage_tool_error("get_usage_summary", e,
                                {'start': start, 'end': end, 'group_by': group_by,
                                 'cluster_id': cluster_id, 'project_id': project_id}) from e
 
@@ -324,7 +377,8 @@ async def query_daily_usage(
     possible billing data issue to confirm with Zilliz support rather than explaining it.
 
     Args:
-        start: First day of the range in YYYY-MM-DD format (UTC)
+        start: First day of the range in YYYY-MM-DD format (UTC). Older dates may not be
+            queryable (observed: from 2025-03-01 on); for earlier months use list_invoices
         end: Last day of the range in YYYY-MM-DD format (UTC, inclusive). Maximum range is 31 days.
         cluster_id: Only include line items for this cluster (optional)
         project_id: Only include line items for this project (optional)
@@ -429,11 +483,14 @@ async def query_daily_usage(
         # Log results
         logger.info(f"QUERY_DAILY_USAGE RESULT: returned {len(days)} days")
 
+        empty_note = early_empty_note(start, results)
+        if empty_note:
+            notes.insert(0, empty_note)
         return hints.ok(days, notes=notes)
 
     except Exception as e:
         logger.error(f"QUERY_DAILY_USAGE ERROR: {str(e)}")
-        raise hints.tool_error("query_daily_usage", e,
+        raise usage_tool_error("query_daily_usage", e,
                                {'start': start, 'end': end, 'cluster_id': cluster_id,
                                 'project_id': project_id}) from e
 

@@ -15,6 +15,7 @@ from zilliz_mcp_server.app import read_tool
 from zilliz_mcp_server.common import hints, openapi_client
 from zilliz_mcp_server.tools.zilliz.billing_tools import (
     MAX_SUMMARY_DAYS, MAX_RAW_DAYS, UNATTRIBUTED, _decimal, _fetch_usage, _money, _parse_range,
+    usage_tool_error, early_empty_note,
 )
 
 logger = logging.getLogger(__name__)
@@ -242,8 +243,10 @@ async def compare_billing_periods(
         bs, be = _parse_range(base_start, base_end, MAX_SUMMARY_DAYS)
         ts, te = _parse_range(target_start, target_end, MAX_SUMMARY_DAYS)
 
-        base, cur_b = _aggregate(_fetch_usage(base_start, base_end, MAX_SUMMARY_DAYS), group_by)
-        target, cur_t = _aggregate(_fetch_usage(target_start, target_end, MAX_SUMMARY_DAYS), group_by)
+        base_raw = _fetch_usage(base_start, base_end, MAX_SUMMARY_DAYS)
+        target_raw = _fetch_usage(target_start, target_end, MAX_SUMMARY_DAYS)
+        base, cur_b = _aggregate(base_raw, group_by)
+        target, cur_t = _aggregate(target_raw, group_by)
         currencies = cur_b | cur_t
         if len(currencies) > 1:
             raise ValueError(f"usage spans multiple currencies: {', '.join(sorted(currencies))}")
@@ -291,6 +294,10 @@ async def compare_billing_periods(
             result["new_key_count"], result["gone_key_count"] = len(new_rows), len(gone_rows)
 
         notes: List[str] = []
+        for side, (start_arg, raw) in {"base": (base_start, base_raw), "target": (target_start, target_raw)}.items():
+            empty_note = early_empty_note(start_arg, raw)
+            if empty_note:  # first: a comparison against an unavailable period is meaningless
+                notes.append(f"{side} period: {empty_note}")
         try:
             invoices, inv_count, complete = _fetch_invoices()
             view = {"base": _invoice_for(invoices, bs, be), "target": _invoice_for(invoices, ts, te)}
@@ -326,4 +333,4 @@ async def compare_billing_periods(
 
     except Exception as e:
         logger.error(f"COMPARE_BILLING_PERIODS ERROR: {str(e)}")
-        raise hints.tool_error("compare_billing_periods", e, ctx) from e
+        raise usage_tool_error("compare_billing_periods", e, ctx) from e
