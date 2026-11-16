@@ -496,7 +496,8 @@ class TestDeleteEntities:
             cluster_id="cluster1",
             region_id="region1",
             collection_name="test_collection",
-            filter="id in [1, 2, 3]"
+            filter="id in [1, 2, 3]",
+            confirm=True
         )
         
         result_data = json.loads(result)["data"]
@@ -531,7 +532,8 @@ class TestDeleteEntities:
             collection_name="test_collection",
             filter="id in [1, 2, 3]",
             db_name="test_db",
-            partition_name="test_partition"
+            partition_name="test_partition",
+            confirm=True
         )
         
         expected_body = {
