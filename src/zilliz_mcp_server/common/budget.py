@@ -9,8 +9,9 @@ how to fetch the rest.
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-# Bytes of JSON allowed for the rows in one tool result.
-RESULT_BUDGET = 50_000
+# Bytes of JSON allowed for the rows (data) in one tool result. Clients were observed to cut tool
+# output at about 50 KB; this leaves room for notes / next_steps in the same envelope.
+RESULT_BUDGET = 45_000
 
 # A list of at least this many numbers is treated as a vector, not a scalar ARRAY.
 _VECTOR_MIN_LEN = 32

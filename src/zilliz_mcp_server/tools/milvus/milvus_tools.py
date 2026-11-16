@@ -528,7 +528,7 @@ async def search(
         grouping_field: The name of the field that serves as the aggregation criteria
         output_fields: An array of fields to return along with the search results. Default returns only
             id and distance. Avoid "*" or vector fields unless you need raw embeddings: a 1024-dim
-            vector is ~14 KB of JSON per hit, and results over ~50 KB are trimmed (see notes).
+            vector is ~14 KB of JSON per hit, and results over ~45 KB are trimmed (see notes).
         metric_type: The name of the metric type that applies to the current search (L2, IP, COSINE)
         search_params: Extra search parameters including radius and range_filter
         partition_names: The name of the partitions to which this operation applies
@@ -656,7 +656,7 @@ async def query(
         db_name: The name of the database. Pass explicit dbName or leave empty when cluster is free or serverless
         output_fields: An array of fields to return along with the query results. If omitted, all
             non-vector fields are returned (vector fields are left out; name them explicitly, or pass
-            ["*"], to get raw embeddings). Results over ~50 KB of JSON are trimmed (see notes).
+            ["*"], to get raw embeddings). Results over ~45 KB of JSON are trimmed (see notes).
         partition_names: The name of the partitions to which this operation applies. If not set, the operation applies to all partitions in the collection
         limit: The total number of entities to return (default: 100). The sum of this value and offset should be less than 16,384
         offset: The number of records to skip in the search result. The sum of this value and limit should be less than 16,384
@@ -784,7 +784,7 @@ async def hybrid_search(
         db_name: The name of the database. Pass explicit dbName or leave empty when cluster is free or serverless
         partition_names: The name of the partitions to which this operation applies
         output_fields: An array of fields to return along with the search results. Avoid vector
-            fields unless you need raw embeddings; results over ~50 KB of JSON are trimmed (see notes).
+            fields unless you need raw embeddings; results over ~45 KB of JSON are trimmed (see notes).
         consistency_level: The consistency level of the search operation (Strong, Eventually, Bounded)
     Returns:
         JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
