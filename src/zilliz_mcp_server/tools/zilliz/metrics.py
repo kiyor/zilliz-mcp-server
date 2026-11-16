@@ -8,6 +8,7 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from zilliz_mcp_server.common.budget import RESULT_BUDGET
 from zilliz_mcp_server.common.hints import StructuredToolError, step
 
 # Request operations that have count / latency / failure-rate series.
@@ -155,11 +156,13 @@ def _num(v: Any) -> Optional[float]:
 NULL_NOTE = ("value=null means the API reported no data point for that time bucket. It is NOT "
              "the same as 0. See each point's 'value_status'.")
 NULL_NOTE_UNEXPLAINED = (
-    "value=null means no data point was reported for that bucket. It is not 0. Common causes: "
-    "the cluster was not running yet, or this operation type has never been called on the "
-    "cluster. Count metrics report 0 (not null) once the operation has been used. To verify, "
-    "query a resource metric such as CU_COMPUTATION for the same window: if it is also null, "
-    "the cluster was not reporting metrics then.")
+    "value=null means no data point was reported for that bucket. It is not 0, and on its own it "
+    "does not show that the operation was unused or the cluster idle: with granularity coarser "
+    "than PT2M, buckets of windows that did have traffic are often null as well. Confirm with a "
+    "fine granularity (PT30S) over a short recent window before concluding there was no activity. "
+    "Other causes: the cluster was not running yet, or the operation had not been used yet. If a "
+    "resource metric such as CU_COMPUTATION is also null at PT30S for the same window, the "
+    "cluster was not reporting metrics then.")
 
 
 def annotate(results: List[Dict[str, Any]], counts: Dict[str, Dict[str, Optional[float]]]) -> None:
@@ -202,7 +205,7 @@ def annotate(results: List[Dict[str, Any]], counts: Dict[str, Dict[str, Optional
                     "say so rather than stating 0%; "
                     "'no_requests' = the request count was 0 in that bucket; "
                     f"'no_data' = neither this metric nor {pair} reported a point (e.g. the operation "
-                    "had never been used yet).")
+                    "was not used then, or coarse buckets hid it; confirm at PT30S).")
             else:
                 res["null_note"] = NULL_NOTE_UNEXPLAINED
 
@@ -236,6 +239,10 @@ def api_error_fix(names: List[str]) -> Optional[str]:
 
 # Buckets per series per request. Observed: 28,800 accepted, 40,320 rejected (error 20011).
 MAX_POINTS = 25000
+# Points (all series together) that a suggested re-query may return so the model can read the
+# whole result: the shared response budget divided by ~100 bytes per point (observed 80-85 bytes
+# per point including value_status).
+READABLE_POINTS = RESULT_BUDGET // 100
 # Finer-to-coarser granularities to suggest when re-querying.
 GRANULARITY_LADDER = ["PT30S", "PT1M", "PT2M", "PT5M", "PT10M", "PT15M", "PT30M", "PT1H", "P1D"]
 # Below this share of buckets with a value, a coarse query is treated as possibly under-sampled.
@@ -280,11 +287,42 @@ def _iso(seconds: int) -> str:
     return f"PT{max(1, seconds // 60)}M"
 
 
+def _readable_period(granularity: str, n_series: int, cap_s: int) -> Optional[str]:
+    """Longest whole-hour period at this granularity whose points (all series) stay readable."""
+    secs = min(cap_s, duration_seconds(granularity) * (READABLE_POINTS // max(1, n_series)))
+    secs = (secs // 3600) * 3600
+    return _iso(secs) if secs > 0 else None
+
+
+def series_summary(results: List[Dict[str, Any]]) -> Optional[str]:
+    """One-line per-series summary (buckets with a value, first/last such timestamp, max).
+
+    Goes into notes, which are emitted before data, so it survives client-side truncation of
+    long results. None when every bucket of every series has a value.
+    """
+    parts = []
+    any_null = False
+    for r in results:
+        values = r.get("values") or []
+        got = [(p.get("timestamp"), _num(p.get("value"))) for p in values if p.get("value") is not None]
+        any_null |= len(got) < len(values)
+        s = f"{r.get('name')}: {len(got)}/{len(values)} buckets with a value"
+        if got:
+            nums = [v for _, v in got if v is not None]
+            s += f", first {got[0][0]}, last {got[-1][0]}"
+            if nums:
+                s += f", max {max(nums):g}"
+        parts.append(s)
+    if not parts or not any_null:
+        return None
+    return "Per series: " + "; ".join(parts) + "."
+
+
 SPARSE_NOTE = (
-    "Few or no buckets have a value at granularity {g}. Each bucket is reported at its timestamp rather "
-    "than aggregated over the whole bucket, so with coarse buckets short or bursty traffic between "
-    "timestamps is missed. A null here does NOT mean no traffic or 0%. Re-query with a finer "
-    "granularity (see next_steps) before concluding there was no activity.")
+    "Few or no buckets have a value at granularity {g}. At coarse granularities, windows that have "
+    "values at PT30S are often reported as null, so a null here does NOT mean no traffic or 0%. "
+    "Re-query a shorter window with fine buckets (see next_steps) before concluding there was no "
+    "activity.")
 
 
 def coverage_hints(results: List[Dict[str, Any]], cluster_id: str, metric_queries: List[Dict[str, str]],
@@ -306,16 +344,23 @@ def coverage_hints(results: List[Dict[str, Any]], cluster_id: str, metric_querie
     if total == 0 or reported / total >= LOW_COVERAGE:
         return [], []
     steps: List[Dict[str, Any]] = []
-    finer = finest_granularity(win)
-    if duration_seconds(finer) < g_s:
-        when = {"start": start, "end": end} if start and end else {"period": period}
-        steps.append(step("query_cluster_metrics",
-                          f"Same window at the finest granularity the API allows for it ({finer}).",
-                          cluster_id=cluster_id, **when, granularity=finer, metric_queries=metric_queries))
-    recent = min(win, 7 * 86400)
-    if recent < win or duration_seconds(finer) > 30:
-        steps.append(step("query_cluster_metrics",
-                          f"Most recent {_iso(recent)} at PT30S/fine buckets for exact recent activity.",
-                          cluster_id=cluster_id, period=_iso(recent), granularity=finest_granularity(recent),
-                          metric_queries=metric_queries))
+    # Suggestions are sized to stay readable (READABLE_POINTS over all series), not to the API's
+    # per-request maximum: a result the client truncates does not help.
+    n = max(1, len(metric_queries or results))
+    for g, why in (("PT30S", "Recent window at PT30S, sized so the whole result stays readable."),
+                   ("PT2M", "Longer recent window at PT2M (sparse traffic was still visible at PT2M), "
+                            "sized to stay readable.")):
+        p = _readable_period(g, n, win)
+        if p and duration_seconds(g) < g_s:
+            when: Dict[str, Any] = {"period": p}
+            if start and end and not period:  # keep an explicit window: its last part
+                try:
+                    b = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+                    a = b.timestamp() - duration_seconds(p)
+                    when = {"start": datetime.fromtimestamp(a, b.tzinfo).isoformat().replace("+00:00", "Z"),
+                            "end": end}
+                except (TypeError, ValueError):
+                    pass
+            steps.append(step("query_cluster_metrics", why, cluster_id=cluster_id, **when,
+                              granularity=g, metric_queries=metric_queries))
     return steps, [SPARSE_NOTE.format(g=granularity) + f" ({reported}/{total} buckets have a value.)"]
