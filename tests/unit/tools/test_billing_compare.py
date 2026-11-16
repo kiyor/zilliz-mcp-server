@@ -118,6 +118,17 @@ async def test_bad_group_by_and_dates_are_invalid_argument():
 
 
 @pytest.mark.asyncio
+async def test_base_before_usage_boundary_gets_actionable_error():
+    with patch(f"{MOD}.openapi_client.control_plane_api_request") as m:
+        with pytest.raises(StructuredToolError) as ei:
+            await _run(base_start="2024-09-01", base_end="2024-09-30")
+    p = ei.value.payload
+    assert p["error"] == "INVALID_ARGUMENT" and p["field"] == "base_start" and "2025-03-01" in p["fix"]
+    assert [s["tool"] for s in p["next_steps"]] == ["list_invoices"]
+    m.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_permission_denied_gives_actionable_error():
     from zilliz_mcp_server.common.openapi_client import ZillizAPIError
     err = ZillizAPIError("Missing ACL permission: orgId=org-x, resource=billing, action=view", code=96041) \
