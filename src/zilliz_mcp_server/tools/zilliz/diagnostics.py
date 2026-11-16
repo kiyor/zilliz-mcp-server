@@ -101,12 +101,17 @@ def assess(name: str, kind: str, cur: Dict[str, Any], counts: Dict[str, Dict[str
         if paired and (paired.get("points_with_data", 0) == 0 or paired.get("max") == 0):
             return {"status": "no_traffic",
                     "basis": f"No data because {_PAIRED_COUNT[name]} shows no requests in this window."}
+        if kind == "fail_rate" and paired.get("max"):
+            return {"status": "unknown_or_no_failures",
+                    "basis": f"Fail rate reported no value while {_PAIRED_COUNT[name]} shows requests were "
+                             "served. This usually means no request failed, but the metric cannot confirm it; "
+                             "say so rather than stating 0%."}
         return {"status": "no_data", "basis": "No data points reported in this window (null is not 0)."}
     if kind == "fail_rate":
         if cur["max"] > 0:
             return {"status": "failures_seen",
                     "basis": f"Failed requests reported (max {cur['max']}% of requests in a bucket)."}
-        return {"status": "no_failures", "basis": "Fail rate was 0 for every bucket with traffic."}
+        return {"status": "no_failures", "basis": "Fail rate was 0 in every bucket that reported a value."}
     return {"status": "not_judged", "basis": NOT_JUDGED_BASIS}
 
 
@@ -215,7 +220,9 @@ async def get_cluster_health(cluster_id: str, window: str = "P1D", compare_previ
         <report>.metrics.<METRIC> = {"unit", "status", "basis", "current": {avg, max, latest, latest_at,
         points_with_data, points_total}, "previous": {...}, "change_percent"}.
         status is one of: no_data (nothing reported; null is not 0), no_traffic (no requests of that
-        type), no_failures, failures_seen, not_judged (no published threshold: read the numbers and
+        type), no_failures (fail rate reported as 0), unknown_or_no_failures (fail rate null while
+        requests were served: probably no failures, but unconfirmed; do not report 0%), failures_seen,
+        not_judged (no published threshold: read the numbers and
         change_percent instead of calling them good or bad).
         Example:
         {

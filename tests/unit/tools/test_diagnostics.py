@@ -8,8 +8,6 @@ import pytest
 
 from zilliz_mcp_server.tools.zilliz import diagnostics as d
 
-pytestmark = pytest.mark.asyncio
-
 NOW = datetime(2026, 11, 16, 12, 0, tzinfo=timezone.utc)
 CLUSTER = {"cluster_id": "in01-abc", "status": "RUNNING", "cluster_name": "c"}
 
@@ -61,6 +59,17 @@ class TestAssess:
         assert "1/2 buckets before" not in e["change_note"] and "Not compared" in e["change_note"]
 
 
+    def test_fail_rate_null_with_traffic_is_unknown_or_no_failures(self):
+        r = report(REQ_SEARCH_COUNT=series([5, 5, 5, 5]))
+        e = r["metrics"]["REQ_FAIL_RATE_SEARCH"]
+        assert e["status"] == "unknown_or_no_failures" and "0%" in e["basis"]
+
+    def test_no_failures_basis_only_claims_reported_buckets(self):
+        r = report(REQ_SEARCH_COUNT=series([5, 5, 5, 5]), REQ_FAIL_RATE_SEARCH=series([0, None, 0, None]))
+        e = r["metrics"]["REQ_FAIL_RATE_SEARCH"]
+        assert e["status"] == "no_failures" and "reported a value" in e["basis"]
+
+
 class TestHints:
     def test_suspended_points_to_resume(self):
         r = d.build_report({**CLUSTER, "status": "SUSPENDED"}, results(), "PT1H", NOW, True)
@@ -78,6 +87,8 @@ class TestHints:
 
 
 class TestTool:
+    pytestmark = pytest.mark.asyncio
+
     @patch("zilliz_mcp_server.tools.zilliz.diagnostics.openapi_client")
     async def test_calls_api_once_for_both_windows(self, client):
         client.control_plane_api_request.side_effect = [
