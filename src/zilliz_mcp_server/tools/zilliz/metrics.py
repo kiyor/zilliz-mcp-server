@@ -4,9 +4,11 @@ The catalog only lists metric names that the Query Cluster Metrics API
 (POST /v2/clusters/{CLUSTER_ID}/metrics/query) actually accepts.
 """
 
+import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from zilliz_mcp_server.common.hints import StructuredToolError
+from zilliz_mcp_server.common.hints import StructuredToolError, step
 
 # Request operations that have count / latency / failure-rate series.
 _OPS = ["INSERT", "BULK_INSERT", "UPSERT", "DELETE", "SEARCH", "QUERY"]
@@ -228,3 +230,92 @@ def api_error_fix(names: List[str]) -> Optional[str]:
         return ("READ_VCU / WRITE_VCU are only available on Serverless clusters; Dedicated clusters "
                 "reject them. Remove them, or use CU_COMPUTATION / CU_CAPACITY on Dedicated clusters.")
     return None
+
+
+# --- granularity / coverage ----------------------------------------------------
+
+# Buckets per series per request. Observed: 28,800 accepted, 40,320 rejected (error 20011).
+MAX_POINTS = 25000
+# Finer-to-coarser granularities to suggest when re-querying.
+GRANULARITY_LADDER = ["PT30S", "PT1M", "PT2M", "PT5M", "PT10M", "PT15M", "PT30M", "PT1H", "P1D"]
+# Below this share of buckets with a value, a coarse query is treated as possibly under-sampled.
+LOW_COVERAGE = 0.5
+
+_DUR_RE = re.compile(r"^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$")
+
+
+def duration_seconds(iso: Optional[str]) -> Optional[int]:
+    """Seconds in an ISO 8601 duration with D/H/M/S parts (the units the API accepts)."""
+    m = _DUR_RE.match(str(iso or "").strip().upper())
+    if not m or not any(m.groups()):
+        return None
+    d, h, mi, s = (int(x or 0) for x in m.groups())
+    return ((d * 24 + h) * 60 + mi) * 60 + s
+
+
+def window_seconds(period: Optional[str], start: Optional[str], end: Optional[str]) -> Optional[int]:
+    if period:
+        return duration_seconds(period)
+    try:
+        a = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+        b = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+        return int((b - a).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
+def finest_granularity(window_s: int) -> str:
+    """Finest granularity whose bucket count for this window stays under MAX_POINTS."""
+    for g in GRANULARITY_LADDER:
+        if window_s / duration_seconds(g) <= MAX_POINTS:
+            return g
+    return GRANULARITY_LADDER[-1]
+
+
+def _iso(seconds: int) -> str:
+    if seconds % 86400 == 0:
+        return f"P{seconds // 86400}D"
+    if seconds % 3600 == 0:
+        return f"PT{seconds // 3600}H"
+    return f"PT{max(1, seconds // 60)}M"
+
+
+SPARSE_NOTE = (
+    "Few or no buckets have a value at granularity {g}. Each bucket is reported at its timestamp rather "
+    "than aggregated over the whole bucket, so with coarse buckets short or bursty traffic between "
+    "timestamps is missed. A null here does NOT mean no traffic or 0%. Re-query with a finer "
+    "granularity (see next_steps) before concluding there was no activity.")
+
+
+def coverage_hints(results: List[Dict[str, Any]], cluster_id: str, metric_queries: List[Dict[str, str]],
+                   granularity: str, period: Optional[str], start: Optional[str], end: Optional[str]):
+    """(steps, notes) when a coarse query looks under-sampled. Empty when coverage is fine."""
+    g_s = duration_seconds(granularity)
+    win = window_seconds(period, start, end)
+    # PT2M and finer were observed to keep sparse data; only coarser queries are checked.
+    if not g_s or not win or g_s <= 120:
+        return [], []
+    total = reported = 0
+    # Latency / fail-rate are legitimately null without requests (see value_status); judge sampling
+    # on the other series when there are any.
+    base = [r for r in results if not paired_count_metric(r.get("name", ""))] or results
+    for r in base:
+        for p in r.get("values") or []:
+            total += 1
+            reported += p.get("value") is not None
+    if total == 0 or reported / total >= LOW_COVERAGE:
+        return [], []
+    steps: List[Dict[str, Any]] = []
+    finer = finest_granularity(win)
+    if duration_seconds(finer) < g_s:
+        when = {"start": start, "end": end} if start and end else {"period": period}
+        steps.append(step("query_cluster_metrics",
+                          f"Same window at the finest granularity the API allows for it ({finer}).",
+                          cluster_id=cluster_id, **when, granularity=finer, metric_queries=metric_queries))
+    recent = min(win, 7 * 86400)
+    if recent < win or duration_seconds(finer) > 30:
+        steps.append(step("query_cluster_metrics",
+                          f"Most recent {_iso(recent)} at PT30S/fine buckets for exact recent activity.",
+                          cluster_id=cluster_id, period=_iso(recent), granularity=finest_granularity(recent),
+                          metric_queries=metric_queries))
+    return steps, [SPARSE_NOTE.format(g=granularity) + f" ({reported}/{total} buckets have a value.)"]
