@@ -1,13 +1,11 @@
 """Zilliz Control Plane billing tools."""
 
-import json
 import logging
-import re
 from collections import defaultdict
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, List, Optional
-from zilliz_mcp_server.common import openapi_client
+from zilliz_mcp_server.common import hints, openapi_client
 from zilliz_mcp_server.app import zilliz_mcp
 
 # Configure logging
@@ -20,24 +18,6 @@ MAX_SUMMARY_DAYS = 366
 MAX_RAW_DAYS = 7
 
 UNATTRIBUTED = "unattributed"
-
-# Business code returned (with HTTP 200) when the API key's user lacks billing access,
-# e.g. {"code": 96041, "message": "Missing ACL permission: ..., resource=billing, action=view"}.
-PERMISSION_DENIED_CODE = 96041
-
-PERMISSION_DENIED_FIX = (
-    "The user that owns this API key needs the Billing Admin (or Organization Owner) organization role. "
-    "An Organization Owner grants it in the Zilliz Cloud console: open the organization > Access Control > "
-    "Members tab > click the pen icon (Edit Role) next to the user > add the Billing Admin role > save "
-    "(see https://docs.zilliz.com/docs/manage-platform-users). Then retry the same tool call. "
-    "Until then, do not estimate or guess amounts."
-)
-
-ADMIN_MESSAGE_TEMPLATE = (
-    "Hi, I need read access to billing data in our Zilliz Cloud organization (missing permission: {perm}). "
-    "Could an Organization Owner open the Zilliz Cloud console > Access Control > Members, click Edit Role "
-    "next to my user, and add the Billing Admin role? Thanks."
-)
 
 INVOICE_AMOUNT_UNIT_NOTE = (
     "Amounts are returned exactly as the API reports them. The API documentation does not state "
@@ -125,62 +105,6 @@ def _format_invoice(invoice: Dict[str, Any]) -> Dict[str, Any]:
     return {field: invoice.get(source) for field, source in _INVOICE_FIELDS.items()}
 
 
-def _is_permission_denied(error: Exception) -> bool:
-    """True when the API rejected the call because the key lacks billing access."""
-    for exc in (error, getattr(error, '__cause__', None)):
-        if exc is None:
-            continue
-        if getattr(exc, 'code', None) == PERMISSION_DENIED_CODE:
-            return True
-        response = getattr(exc, 'response', None)
-        if getattr(response, 'status_code', None) in (401, 403):
-            return True
-        text = str(exc)
-        if str(PERMISSION_DENIED_CODE) in text or 'Missing ACL permission' in text:
-            return True
-    return False
-
-
-def _missing_permission(message: str) -> str:
-    """Extract 'resource:action' (e.g. billing:view) from the API's ACL error text."""
-    resource = re.search(r"resource=([\w.-]+)", message)
-    action = re.search(r"action=([\w.-]+)", message)
-    if resource and action:
-        return f"{resource.group(1)}:{action.group(1)}"
-    return "billing:view"
-
-
-def _billing_error(tool: str, error: Exception, fallback: str, args: Optional[Dict[str, Any]] = None) -> Exception:
-    """Turn a billing API failure into an actionable error for the agent.
-
-    Permission failures become a JSON error that says what permission is missing,
-    who can grant it, where, what to retry, and a message the user can forward to
-    their admin. Other failures keep the original message.
-    """
-    if _is_permission_denied(error):
-        message = str(error)
-        perm = _missing_permission(message)
-        if len(message) > 300:
-            message = message[:300] + "..."
-        payload = {
-            'error': 'PERMISSION_DENIED',
-            'message': message,
-            'field': 'ZILLIZ_CLOUD_TOKEN',
-            'missing_permission': perm,
-            'who_can_grant': 'An Organization Owner of the Zilliz Cloud organization',
-            'required_role': 'Billing Admin (or Organization Owner)',
-            'fix': PERMISSION_DENIED_FIX,
-            'next_steps': [{
-                'tool': tool,
-                'args': {k: v for k, v in (args or {}).items() if v is not None},
-                'why': 'Retry with the same arguments after the Billing Admin role has been granted.',
-            }],
-            'message_for_admin': ADMIN_MESSAGE_TEMPLATE.format(perm=perm),
-        }
-        return Exception(json.dumps(payload))
-    return Exception(f"{fallback}: {str(error)}")
-
-
 @zilliz_mcp.tool()
 async def get_usage_summary(
     start: str,
@@ -193,8 +117,10 @@ async def get_usage_summary(
     Summarize Zilliz Cloud billing usage (cost) for the organization over a date range.
     Prefer this tool for cost questions such as "what did cluster X cost last month"
     or "what is my biggest cost driver". Requires an API key belonging to an
-    organization owner or billing admin; otherwise it fails with error PERMISSION_DENIED,
-    and you should tell the user how to get access instead of estimating costs.
+    with the Organization Owner or Organization Billing Admin role (a personal key uses
+    its user's role; a customized key has its own role). Otherwise it fails with error
+    PERMISSION_DENIED; relay its fix and message_for_admin to the user instead of
+    estimating costs. AUTH_FAILED means the key itself is invalid, not a missing role.
 
     Usage is the metered cost (quantity x unit price) BEFORE credits, discounts, advance
     pay and tax are applied, so it can differ from what was invoiced or paid. Use
@@ -292,13 +218,13 @@ async def get_usage_summary(
         # Log results
         logger.info(f"GET_USAGE_SUMMARY RESULT: total={summary['total']}, groups={len(groups)}")
 
-        return json.dumps(summary)
+        return hints.ok(summary)
 
     except Exception as e:
         logger.error(f"GET_USAGE_SUMMARY ERROR: {str(e)}")
-        raise _billing_error("get_usage_summary", e, "Failed to get usage summary",
-                             {'start': start, 'end': end, 'group_by': group_by,
-                              'cluster_id': cluster_id, 'project_id': project_id}) from e
+        raise hints.tool_error("get_usage_summary", e,
+                               {'start': start, 'end': end, 'group_by': group_by,
+                                'cluster_id': cluster_id, 'project_id': project_id}) from e
 
 
 @zilliz_mcp.tool()
@@ -390,13 +316,13 @@ async def query_daily_usage(
         # Log results
         logger.info(f"QUERY_DAILY_USAGE RESULT: returned {len(days)} days")
 
-        return json.dumps(days)
+        return hints.ok(days)
 
     except Exception as e:
         logger.error(f"QUERY_DAILY_USAGE ERROR: {str(e)}")
-        raise _billing_error("query_daily_usage", e, "Failed to query daily usage",
-                             {'start': start, 'end': end, 'cluster_id': cluster_id,
-                              'project_id': project_id}) from e
+        raise hints.tool_error("query_daily_usage", e,
+                               {'start': start, 'end': end, 'cluster_id': cluster_id,
+                                'project_id': project_id}) from e
 
 
 @zilliz_mcp.tool()
@@ -470,12 +396,12 @@ async def list_invoices(page_size: int = 10, current_page: int = 1) -> str:
         # Log results
         logger.info(f"LIST_INVOICES RESULT: found {len(invoices)} invoices")
 
-        return json.dumps(result)
+        return hints.ok(result)
 
     except Exception as e:
         logger.error(f"LIST_INVOICES ERROR: {str(e)}")
-        raise _billing_error("list_invoices", e, "Failed to list invoices",
-                             {'page_size': page_size, 'current_page': current_page}) from e
+        raise hints.tool_error("list_invoices", e,
+                               {'page_size': page_size, 'current_page': current_page}) from e
 
 
 @zilliz_mcp.tool()
@@ -505,9 +431,8 @@ async def describe_invoice(invoice_id: str) -> str:
         # Log results
         logger.info(f"DESCRIBE_INVOICE RESULT: status={invoice['status']}, total={invoice['total']}")
 
-        return json.dumps(invoice)
+        return hints.ok(invoice)
 
     except Exception as e:
         logger.error(f"DESCRIBE_INVOICE ERROR: {str(e)}")
-        raise _billing_error("describe_invoice", e, "Failed to describe invoice",
-                             {'invoice_id': invoice_id}) from e
+        raise hints.tool_error("describe_invoice", e, {'invoice_id': invoice_id}) from e
