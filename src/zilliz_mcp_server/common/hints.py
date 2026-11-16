@@ -103,12 +103,25 @@ _WHERE_TO_GRANT = (
     "Access Control > Members > Edit Role. If it is a customized API key, edit the key's role under API Keys.")
 
 
-def _permission_fix(resource: Optional[str], action: Optional[str]) -> str:
+def _call_repr(tool: str, ctx: Optional[Dict[str, Any]]) -> str:
+    """tool(arg=value, ...) for the retry instruction; long values are shortened."""
+    parts = []
+    for k, v in (ctx or {}).items():
+        if v in (None, "", [], {}):
+            continue
+        text = json.dumps(v, default=str)
+        parts.append(f"{k}={text if len(text) <= 60 else text[:57] + '...'}")
+    return f"{tool}({', '.join(parts)})"
+
+
+def _permission_fix(resource: Optional[str], action: Optional[str], tool: str = "the tool",
+                    ctx: Optional[Dict[str, Any]] = None) -> str:
     what = f"'{action}' on '{resource}'" if resource and action else "this operation"
     return (f"The API key is valid but is not allowed to perform {what}. Tell the user: {_who_grants(resource)} "
             f"must grant {_role_needed(resource, action)} in the Zilliz Cloud console. {_WHERE_TO_GRANT} "
             f"Alternatively configure the MCP server with a key that already has it. Retrying with other "
-            f"arguments will not help; retry the same call after it is granted.")
+            f"arguments will not help. After access is granted, retry {_call_repr(tool, ctx)} with the same "
+            f"arguments.")
 
 
 def _who_grants(resource: Optional[str]) -> str:
@@ -174,7 +187,7 @@ def classify_error(tool: str, exc: Exception, ctx: Optional[Dict[str, Any]] = No
             expected=f"an API key whose role allows '{action}' on '{resource}'" if acl
             else "an API key whose role allows this operation",
             got=f"resource={resource}, action={action}" if acl else None,
-            fix=_permission_fix(resource, action),
+            fix=_permission_fix(resource, action, tool, ctx),
             missing_permission=f"{resource}:{action}" if acl else None,
             who_can_grant=_who_grants(resource),
             required_role=_role_needed(resource, action),

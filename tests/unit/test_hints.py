@@ -122,6 +122,13 @@ class TestClassifyError:
         assert p["next_steps"][0] == {"tool": "describe_cluster", "args": {"cluster_id": CID},
                                       "why": p["next_steps"][0]["why"]}
 
+    def test_permission_fix_names_the_exact_retry_call(self):
+        e = ZillizAPIError("Missing ACL permission: orgId=o, resource=billing, action=view", code=96041)
+        p = classify_error("list_invoices", e, {"start": "2025-03-01", "end": None})
+        assert 'After access is granted, retry list_invoices(start="2025-03-01")' in p["fix"]
+        p = classify_error("describe_cluster", e, {"cluster_id": CID})
+        assert f'retry describe_cluster(cluster_id="{CID}")' in p["fix"]
+
     def test_unknown_keeps_message(self):
         p = classify_error("x", Exception("weird"))
         assert p["error"] == "INTERNAL_ERROR" and p["message"] == "weird"
