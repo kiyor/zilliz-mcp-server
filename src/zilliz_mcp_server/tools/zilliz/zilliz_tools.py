@@ -8,6 +8,7 @@ from zilliz_mcp_server.common import hints
 from zilliz_mcp_server.common import next_steps as ns
 from zilliz_mcp_server.settings import config
 from zilliz_mcp_server.app import zilliz_mcp
+from zilliz_mcp_server.tools.zilliz import metrics as metrics_catalog
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -365,85 +366,77 @@ async def query_cluster_metrics(
 ) -> str:
     """
     Query the metrics of a specific cluster.
-    
+
     Args:
         cluster_id: ID of the target cluster
-        start: Starting date and time in ISO 8601 timestamp format (optional, use with end)
-        end: Ending date and time in ISO 8601 timestamp format (optional, use with start)
-        period: Duration in ISO 8601 duration format (optional, use when start/end not set)
-        granularity: Time interval for metrics reporting in ISO 8601 duration format (minimum PT30S)
-        metric_queries: List of metric queries, each containing 'metricName' and 'stat' fields
-            - metricName: Name of the metric. Available options:
-                * CU_COMPUTATION - Compute unit computation usage
-                * CU_CAPACITY - Compute unit capacity
-                * STORAGE_USE - Storage usage
-                * REQ_INSERT_COUNT - Insert request count
-                * REQ_BULK_INSERT_COUNT - Bulk insert request count
-                * REQ_UPSERT_COUNT - Upsert request count
-                * REQ_DELETE_COUNT - Delete request count
-                * REQ_SEARCH_COUNT - Search request count
-                * REQ_QUERY_COUNT - Query request count
-                * VECTOR_REQ_INSERT_COUNT - Vector insert request count
-                * VECTOR_REQ_UPSERT_COUNT - Vector upsert request count
-                * VECTOR_REQ_SEARCH_COUNT - Vector search request count
-                * REQ_INSERT_LATENCY_P99 - Insert request latency P99
-                * REQ_BULK_INSERT_LATENCY_P99 - Bulk insert request latency P99
-                * REQ_UPSERT_LATENCY_P99 - Upsert request latency P99
-                * REQ_DELETE_LATENCY_P99 - Delete request latency P99
-                * REQ_SEARCH_LATENCY_P99 - Search request latency P99
-                * REQ_QUERY_LATENCY_P99 - Query request latency P99
-                * REQ_SUCCESS_RATE - Request success rate
-                * REQ_FAIL_RATE - Request failure rate
-                * REQ_FAIL_RATE_INSERT - Insert request failure rate
-                * REQ_FAIL_RATE_BULK_INSERT - Bulk insert request failure rate
-                * REQ_FAIL_RATE_UPSERT - Upsert request failure rate
-                * REQ_FAIL_RATE_DELETE - Delete request failure rate
-                * REQ_FAIL_RATE_SEARCH - Search request failure rate
-                * REQ_FAIL_RATE_QUERY - Query request failure rate
-                * ENTITIES_LOADED - Number of loaded entities
-                * ENTITIES_INSERT_RATE - Entity insert rate
-                * COLLECTIONS_COUNT - Collection count
-                * ENTITIES_COUNT - Total entity count
-            - stat: Statistical method (AVG for average, P99 for 99th percentile - P99 only valid for latency metrics)
+        start: Start time, ISO 8601 UTC timestamp, e.g. "2024-06-30T16:00:00Z" (use together with end)
+        end: End time, ISO 8601 UTC timestamp (use together with start)
+        period: Lookback duration in ISO 8601, e.g. "PT1H", "P1D" (use instead of start/end)
+        granularity: Bucket size in ISO 8601 duration format, minimum PT30S (e.g. PT1M, PT5M, PT1H)
+        metric_queries: List of objects {"metricName": <name>, "stat": "AVG"}. 'stat' is optional
+            and defaults to AVG. The API ignores stat for aggregation: each bucket holds the value of
+            the named metric. Latency percentiles are chosen by the metric NAME (..._LATENCY_AVG vs
+            ..._LATENCY_P99), not by stat. Valid stat: AVG for every metric; P99 is also accepted
+            for *_LATENCY_P99. Anything else is rejected locally with the valid values.
+            metricName must be one of:
+              Resource: CU_COMPUTATION, CU_CAPACITY, STORAGE_USE (GB), CLUSTER_WRITE_CAPACITY,
+                READ_VCU, WRITE_VCU (Serverless clusters only; Dedicated clusters reject them)
+              Throughput (per second): REQ_INSERT_COUNT, REQ_BULK_INSERT_COUNT, REQ_UPSERT_COUNT,
+                REQ_DELETE_COUNT, REQ_SEARCH_COUNT, REQ_QUERY_COUNT, VECTOR_REQ_INSERT_COUNT,
+                VECTOR_REQ_BULK_INSERT_COUNT, VECTOR_REQ_UPSERT_COUNT, VECTOR_REQ_DELETE_COUNT,
+                VECTOR_REQ_SEARCH_COUNT; SLOW_QUERY_COUNT (per minute)
+              Latency (ms): REQ_{INSERT,UPSERT,DELETE,SEARCH,QUERY}_LATENCY_AVG and
+                REQ_{INSERT,UPSERT,DELETE,SEARCH,QUERY}_LATENCY_P99 (e.g. REQ_SEARCH_LATENCY_P99)
+              Failure rate (percent, per operation): REQ_FAIL_RATE_INSERT, REQ_FAIL_RATE_BULK_INSERT,
+                REQ_FAIL_RATE_UPSERT, REQ_FAIL_RATE_DELETE, REQ_FAIL_RATE_SEARCH, REQ_FAIL_RATE_QUERY.
+                There is no overall success/fail rate metric; success rate = 100 - fail rate.
+              Data: ENTITIES_COUNT, ENTITIES_LOADED, ENTITIES_INDEXED, COLLECTIONS_COUNT,
+                UNLOADED_COLLECTIONS_COUNT, FLUSH_COUNT (per minute)
     Returns:
-        JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
-        next_steps/notes are present only when useful. On failure the error text is JSON
-        {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
-        <result>:
-        Dict containing cluster metrics data
-        Example (full envelope, hints omitted):
+        JSON with the API response. Values are strings. Every point also carries 'value_status':
+          - "reported": a real value (may be "0", meaning zero).
+          - "no_failures": fail-rate is null but requests were served in that bucket -> no request
+            failed (treat as 0%).
+          - "no_requests": latency / fail-rate is null because no requests of that type were served.
+          - "no_data": no point reported (e.g. cluster not running yet, or the operation was never
+            used); this is NOT zero.
+        Results containing nulls also carry 'null_points' and a 'null_note' explaining them. For
+        latency / fail-rate metrics the tool fetches the matching REQ_<OP>_COUNT for the same window
+        to tell these cases apart.
+        Example:
         {
             "data": {
                 "results": [
                     {
-                        "name": "CU_COMPUTATION",
-                        "stat": "AVG", 
+                        "name": "REQ_FAIL_RATE_SEARCH",
+                        "stat": "AVG",
                         "unit": "percent",
                         "values": [
-                            {
-                                "timestamp": "2024-06-30T16:09:53Z",
-                                "value": "1.00"
-                            }
-                        ]
+                            {"timestamp": "2024-06-30T16:05:00Z", "value": null, "value_status": "no_failures"},
+                            {"timestamp": "2024-06-30T16:10:00Z", "value": "0.50", "value_status": "reported"}
+                        ],
+                        "null_points": 1,
+                        "null_note": "..."
                     }
                 ]
             }
         }
-        
+
     """
     try:
         # Log request
         logger.info(f"QUERY_CLUSTER_METRICS: cluster_id={cluster_id}, metrics_count={len(metric_queries)}")
-        
+
         # Build URI with cluster_id as path parameter
         uri = f"/v2/clusters/{cluster_id}/metrics/query"
-        
-        # Build request body
+
+        # Validate metric names / stat locally so the model gets the valid values immediately
+        queries = metrics_catalog.validate_metric_queries(metric_queries)
         body = {
             'granularity': granularity,
-            'metricQueries': []
+            'metricQueries': queries
         }
-        
+
         # Add time parameters (either start/end or period)
         if start and end:
             body['start'] = start
@@ -451,28 +444,35 @@ async def query_cluster_metrics(
         elif period:
             body['period'] = period
         else:
-            raise ValueError("Either provide both 'start' and 'end', or provide 'period'")
-        
-        # Format metric queries
-        for metric_query in metric_queries:
-            if 'metricName' not in metric_query or 'stat' not in metric_query:
-                raise ValueError("Each metric query must contain 'metricName' and 'stat' fields")
-            
-            formatted_query = {
-                'name': metric_query['metricName'],
-                'stat': metric_query['stat']
-            }
-            body['metricQueries'].append(formatted_query)
-        
-        response = openapi_client.control_plane_api_request(uri, body_map=body, method="POST")
-        
-        # Log results
+            raise ValueError("Either provide both 'start' and 'end', or provide 'period' (e.g. \"PT1H\")")
+
+        names = [q['name'] for q in queries]
+        try:
+            response = openapi_client.control_plane_api_request(uri, body_map=body, method="POST")
+        except Exception as api_err:
+            raise Exception(metrics_catalog.explain_api_error(str(api_err), names)) from api_err
+
         data = response.get('data', {})
         results = data.get('results', [])
+
+        # Explain nulls: fetch paired request-count series for latency / fail-rate metrics
+        counts = metrics_catalog.series_by_timestamp(results)
+        extra = metrics_catalog.needed_count_metrics(results, counts)
+        if extra:
+            extra_body = {k: v for k, v in body.items() if k != 'metricQueries'}
+            extra_body['metricQueries'] = [{'name': n, 'stat': 'AVG'} for n in extra]
+            try:
+                extra_resp = openapi_client.control_plane_api_request(uri, body_map=extra_body, method="POST")
+                counts.update(metrics_catalog.series_by_timestamp(
+                    extra_resp.get('data', {}).get('results', [])))
+            except Exception as pair_err:
+                logger.warning(f"QUERY_CLUSTER_METRICS: paired count lookup failed: {pair_err}")
+        metrics_catalog.annotate(results, counts)
+
         logger.info(f"QUERY_CLUSTER_METRICS RESULT: returned {len(results)} metric results")
-        
+
         return hints.ok(data, *ns.query_cluster_metrics(data, cluster_id))
-        
+
     except Exception as e:
         logger.error(f"QUERY_CLUSTER_METRICS ERROR: {str(e)}")
         raise hints.tool_error("query_cluster_metrics", e,
