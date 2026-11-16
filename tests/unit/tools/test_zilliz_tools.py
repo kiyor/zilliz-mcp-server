@@ -235,7 +235,7 @@ class TestSuspendCluster:
         }
         mock_client.control_plane_api_request.return_value = mock_response
         
-        result = await suspend_cluster("in01-test123")
+        result = await suspend_cluster("in01-test123", confirm=True)
         result_data = json.loads(result)["data"]
         
         assert result_data['cluster_id'] == 'in01-test123'

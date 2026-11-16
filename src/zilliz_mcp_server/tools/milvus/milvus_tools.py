@@ -6,14 +6,14 @@ from zilliz_mcp_server.common import openapi_client
 from zilliz_mcp_server.common import hints
 from zilliz_mcp_server.common import next_steps as ns
 from zilliz_mcp_server.settings import config
-from zilliz_mcp_server.app import zilliz_mcp
+from zilliz_mcp_server.app import zilliz_mcp, read_tool, write_tool
 
 # Configure logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 
-@zilliz_mcp.tool()
+@read_tool()
 async def list_databases(cluster_id: str, region_id: str) -> str:
     """
     List all databases in the current cluster.
@@ -62,7 +62,7 @@ async def list_databases(cluster_id: str, region_id: str) -> str:
         raise hints.tool_error("list_databases", e, {"cluster_id": cluster_id, "region_id": region_id}) from e
 
 
-@zilliz_mcp.tool()
+@read_tool()
 async def list_collections(cluster_id: str, region_id: str, db_name: str = "") -> str:
     """
     List all collection names in the specified database.
@@ -113,7 +113,7 @@ async def list_collections(cluster_id: str, region_id: str, db_name: str = "") -
                                {"cluster_id": cluster_id, "region_id": region_id, "db_name": db_name}) from e
 
 
-@zilliz_mcp.tool()
+@write_tool(destructive=False)
 async def create_collection(
     cluster_id: str, 
     region_id: str, 
@@ -199,7 +199,7 @@ async def create_collection(
             "collection_name": collection_name}) from e
 
 
-@zilliz_mcp.tool()
+@read_tool()
 async def describe_collection(
     cluster_id: str, 
     region_id: str, 
@@ -305,7 +305,7 @@ async def describe_collection(
             "collection_name": collection_name}) from e
 
 
-@zilliz_mcp.tool()
+@write_tool(destructive=False)
 async def insert_entities(
     cluster_id: str,
     region_id: str, 
@@ -374,30 +374,82 @@ async def insert_entities(
             "collection_name": collection_name}) from e
 
 
-@zilliz_mcp.tool()
+def _delete_preview(cluster_id: str, region_id: str, collection_name: str, filter: str,
+                    db_name: str, partition_name: str) -> str:
+    """Count the entities a delete would remove, without deleting anything."""
+    body = {"collectionName": collection_name, "filter": filter, "outputFields": ["count(*)"]}
+    if db_name:
+        body["dbName"] = db_name
+    if partition_name:
+        body["partitionNames"] = [partition_name]
+    count = None
+    count_error = None
+    try:
+        response = openapi_client.data_plane_api_request(
+            uri="/v2/vectordb/entities/query", cluster_id=cluster_id, region_id=region_id,
+            body_map=body, method="POST")
+        rows = response.get('data') or []
+        if rows and isinstance(rows[0], dict):
+            count = rows[0].get('count(*)')
+    except Exception as e:  # the preview must not block the user from confirming
+        count_error = str(e)[:300]
+    preview = {
+        'confirm_required': True,
+        'action': 'delete_entities',
+        'collection_name': collection_name,
+        'filter': filter,
+        'matching_entities': count,
+        'impact': "Deleting is irreversible: matching entities cannot be recovered.",
+    }
+    if db_name:
+        preview['db_name'] = db_name
+    if partition_name:
+        preview['partition_name'] = partition_name
+    if count_error:
+        preview['count_error'] = count_error
+    args = {"cluster_id": cluster_id, "region_id": region_id, "collection_name": collection_name,
+            "filter": filter, "db_name": db_name, "partition_name": partition_name, "confirm": True}
+    args = {k: v for k, v in args.items() if v != ""}
+    return hints.ok(preview, [hints.step("delete_entities", "only after the user confirms this deletion", **args)],
+                    ["Nothing was deleted. Ask the user to confirm before re-calling with confirm=true."])
+
+
+@write_tool(destructive=True, idempotent=True)
 async def delete_entities(
     cluster_id: str,
     region_id: str,
     collection_name: str,
     filter: str,
     db_name: str = "",
-    partition_name: str = ""
+    partition_name: str = "",
+    confirm: bool = False
 ) -> str:
     """
-    Delete entities from a collection by filtering conditions or primary keys.
-    
+    Delete entities from a collection by filtering conditions or primary keys. IRREVERSIBLE:
+    deleted entities cannot be recovered. Only call this when the user explicitly asks to
+    delete data matching this filter.
+
+    Two steps: call with confirm=false (default) to get a preview with the number of
+    entities that match the filter, without deleting anything. Show it to the user and
+    call again with the same arguments and confirm=true only after they confirm.
+
     Args:
         cluster_id: ID of the cluster
         region_id: ID of the cloud region hosting the cluster
         collection_name: The name of an existing collection
-        filter: A scalar filtering condition to filter matching entities. You can set this parameter to an empty string to skip scalar filtering. To build a scalar filtering condition, refer to Reference on Scalar Filters
+        filter: A scalar filtering condition or primary-key expression selecting the entities to delete, e.g. 'id in [1, 2]'. Required; an empty filter is rejected
         db_name: The name of the target database. Pass explicit dbName or leave empty when cluster is free or serverless
         partition_name: The name of a partition in the current collection. If specified, the data is to be deleted from the specified partition
+        confirm: false (default) returns the preview only; true deletes the matching entities
     Returns:
         JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
         next_steps/notes are present only when useful. On failure the error text is JSON
         {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
-        <result>:
+        <result> with confirm=false:
+        {"confirm_required": true, "action": "delete_entities", "collection_name": "...",
+        "filter": "...", "matching_entities": <int, or null if it could not be counted>,
+        "impact": "..."}
+        <result> with confirm=true:
         Dict containing the response
         Example (full envelope, hints omitted):
         {
@@ -407,8 +459,14 @@ async def delete_entities(
     """
     try:
         # Log request
-        logger.info(f"DELETE_ENTITIES: collection_name={collection_name}, filter={filter}, cluster_id={cluster_id}")
-        
+        logger.info(f"DELETE_ENTITIES: collection_name={collection_name}, filter={filter}, cluster_id={cluster_id}, confirm={confirm}")
+
+        if not filter or not filter.strip():
+            raise ValueError("filter is required for delete_entities; pass a condition such as 'id in [1, 2]'")
+
+        if confirm is not True:
+            return _delete_preview(cluster_id, region_id, collection_name, filter, db_name, partition_name)
+
         # Build request body
         body = {
             "collectionName": collection_name,
@@ -444,7 +502,7 @@ async def delete_entities(
             "collection_name": collection_name, "filter": filter}) from e
 
 
-@zilliz_mcp.tool()
+@read_tool()
 async def search(
     cluster_id: str,
     region_id: str,
@@ -577,7 +635,7 @@ async def search(
             "collection_name": collection_name, "anns_field": anns_field, "filter": filter}) from e
 
 
-@zilliz_mcp.tool()
+@read_tool()
 async def query(
     cluster_id: str,
     region_id: str,
@@ -678,7 +736,7 @@ async def query(
             "collection_name": collection_name, "filter": filter}) from e
 
 
-@zilliz_mcp.tool()
+@read_tool()
 async def hybrid_search(
     cluster_id: str,
     region_id: str,
