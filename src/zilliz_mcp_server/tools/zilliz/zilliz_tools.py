@@ -503,7 +503,7 @@ async def query_cluster_metrics(
         steps, notes = ns.query_cluster_metrics(data, cluster_id)
         cov_steps, cov_notes = metrics_catalog.coverage_hints(
             results, cluster_id, metric_queries, granularity, period, start, end)
-        summary = metrics_catalog.series_summary(results)
+        summary = metrics_catalog.series_summary(results, granularity)
         return hints.ok(data, cov_steps + steps, ([summary] if summary else []) + cov_notes + notes)
 
     except Exception as e:
