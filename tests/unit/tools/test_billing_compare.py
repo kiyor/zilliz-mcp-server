@@ -118,14 +118,30 @@ async def test_bad_group_by_and_dates_are_invalid_argument():
 
 
 @pytest.mark.asyncio
-async def test_base_before_usage_boundary_gets_actionable_error():
-    with patch(f"{MOD}.openapi_client.control_plane_api_request") as m:
+async def test_base_bad_request_gets_actionable_error():
+    from zilliz_mcp_server.common.openapi_client import ZillizAPIError
+    def fake(uri, params_map=None, body_map=None, method="GET"):
+        if body_map and body_map["start"].startswith("2024"):
+            raise ZillizAPIError("Bad request.", code=3)
+        return _usage()
+    with patch(f"{MOD}.openapi_client.control_plane_api_request", side_effect=fake) as m:
         with pytest.raises(StructuredToolError) as ei:
             await _run(base_start="2024-09-01", base_end="2024-09-30")
     p = ei.value.payload
+    assert m.called  # no local cut-off: the server decides
     assert p["error"] == "INVALID_ARGUMENT" and p["field"] == "base_start" and "2025-03-01" in p["fix"]
     assert [s["tool"] for s in p["next_steps"]] == ["list_invoices"]
-    m.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_empty_early_base_is_not_read_as_zero_spend():
+    def fake(uri, params_map=None, body_map=None, method="GET"):
+        if uri == "/v2/invoices":
+            return INVOICES
+        return _usage() if body_map["start"].startswith("2022") else _usage(_item("in01-a", "compute", 10, 50))
+    with patch(f"{MOD}.openapi_client.control_plane_api_request", side_effect=fake):
+        out = await _run(base_start="2022-09-01", base_end="2022-09-30")
+    assert out["notes"][0].startswith("base period:") and "empty does not mean zero spend" in out["notes"][0]
 
 
 @pytest.mark.asyncio
