@@ -111,8 +111,8 @@ class TestClassifyError:
         assert p["error"] == "PERMISSION_DENIED"
         assert p["got"] == "resource=billing, action=view"
         assert p["missing_permission"] == "billing:view"
-        assert "Billing Admin" in p["who_can_grant"]
-        assert "API Keys" in p["message_for_admin"] and "billing:view" in p["message_for_admin"]
+        assert "Organization Owner" in p["who_can_grant"]
+        assert "Members > Edit Role" in p["message_for_admin"] and "API Keys" in p["message_for_admin"] and "billing:view" in p["message_for_admin"]
         assert "Tell the user" in p["fix"]
         assert p["next_steps"][0]["tool"] == "x"
 

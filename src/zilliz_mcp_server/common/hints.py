@@ -93,23 +93,28 @@ _ACL_RE = re.compile(r"resource=([\w-]+),\s*action=([\w-]+)")
 _CODE_MISSING_ACL = 96041
 
 
+_WHERE_TO_GRANT = (
+    "If it is a personal API key, it inherits the user's organization role: change the user's role under "
+    "Access Control > Members > Edit Role. If it is a customized API key, edit the key's role under API Keys.")
+
+
 def _permission_fix(resource: Optional[str], action: Optional[str]) -> str:
     what = f"'{action}' on '{resource}'" if resource and action else "this operation"
     return (f"The API key is valid but is not allowed to perform {what}. Tell the user: {_who_grants(resource)} "
-            f"must grant this API key {_role_needed(resource, action)} in the Zilliz Cloud console "
-            f"(Organization > API Keys > edit this key's role), or configure the MCP server with a key that "
-            f"already has it. Retrying with other arguments will not help; retry the same call after it is granted.")
+            f"must grant {_role_needed(resource, action)} in the Zilliz Cloud console. {_WHERE_TO_GRANT} "
+            f"Alternatively configure the MCP server with a key that already has it. Retrying with other "
+            f"arguments will not help; retry the same call after it is granted.")
 
 
 def _who_grants(resource: Optional[str]) -> str:
     if resource == "billing":
-        return "an Organization Owner or Organization Billing Admin"
+        return "an Organization Owner of the Zilliz Cloud organization"
     return "an Organization Owner (or a Project Admin of the cluster's project)"
 
 
 def _role_needed(resource: Optional[str], action: Optional[str]) -> str:
     if resource == "billing":
-        return "an organization role with billing access (Organization Owner or Organization Billing Admin)"
+        return "the Organization Billing Admin role (or Organization Owner)"
     if resource:
         return f"a role that grants '{action or 'access'}' on '{resource}'"
     return "a role that allows this operation"
@@ -117,9 +122,10 @@ def _role_needed(resource: Optional[str], action: Optional[str]) -> str:
 
 def _admin_message(tool: str, resource: Optional[str], action: Optional[str]) -> str:
     perm = f"'{resource}:{action}'" if resource and action else f"the permission needed for '{tool}'"
-    return (f"Hi, could you grant our Zilliz Cloud API key {_role_needed(resource, action)}? It currently lacks "
-            f"{perm}. You can change it in the Zilliz Cloud console under Organization > API Keys "
-            f"(edit the key and update its role). Thanks!")
+    return (f"Hi, could you grant {_role_needed(resource, action)} to the Zilliz Cloud API key we use? It "
+            f"currently lacks {perm}. In the Zilliz Cloud console: for a personal API key, go to Access Control > "
+            f"Members > Edit Role for my user; for a customized API key, edit that key's role under API Keys. "
+            f"Thanks!")
 
 
 def classify_error(tool: str, exc: Exception, ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
