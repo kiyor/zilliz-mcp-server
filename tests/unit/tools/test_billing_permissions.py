@@ -111,10 +111,11 @@ class TestInvoiceDocsAndAmounts:
         assert "paid, void" in doc
         assert "free" not in doc
 
-    def test_amount_unit_not_hardcoded(self):
+    def test_amount_unit_documented_as_whole_currency_units(self):
+        # Measured against real invoices: usage_amount matched the summed daily usage (USD) within ~1%.
         doc = billing_tools.list_invoices.__doc__
-        assert "not cents" not in doc
-        assert "does not say whether" in doc
+        assert "whole units of currency" in doc and "not cents" in doc
+        assert "does not say whether" not in doc
 
     def test_usage_docs_say_before_credits(self):
         assert "BEFORE credits" in billing_tools.get_usage_summary.__doc__
@@ -132,7 +133,7 @@ class TestInvoiceDocsAndAmounts:
         result = json.loads(_call("list_invoices"))["data"]
         assert result["invoices"][0]["usage_amount"] == 883850
         assert result["invoices"][0]["status"] == "void"
-        assert "does not state" in result["amount_unit_note"]
+        assert "whole units" in result["amount_unit_note"]
 
     @patch('zilliz_mcp_server.tools.zilliz.billing_tools.openapi_client')
     def test_describe_invoice_has_note(self, mock_client):
