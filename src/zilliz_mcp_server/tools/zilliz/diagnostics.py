@@ -215,7 +215,7 @@ async def get_cluster_health(cluster_id: str, window: str = "P1D", compare_previ
         window: Time window ending now: "PT1H", "PT6H", "P1D" (default) or "P7D"
         compare_previous: Also summarize the previous window of the same length (default: True)
     Returns:
-        JSON {"data": <report>, "next_steps": [...], "notes": [...]}; on failure the error text is JSON
+        JSON {"notes": [...], "next_steps": [...], "data": <report>}; on failure the error text is JSON
         {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
         <report>.metrics.<METRIC> = {"unit", "status", "basis", "current": {avg, max, latest, latest_at,
         points_with_data, points_total}, "previous": {...}, "change_percent"}.
