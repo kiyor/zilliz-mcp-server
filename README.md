@@ -120,6 +120,12 @@ You can then configure your agent or MCP client to connect to it using a configu
 }
 ```
 
+### 4.3. Read-only mode
+
+Set `ZILLIZ_MCP_READ_ONLY=true` in the server's environment to expose only tools that read data. The tools that create, change or delete resources or data (`create_free_cluster`, `suspend_cluster`, `resume_cluster`, `create_collection`, `insert_entities`, `delete_entities`) are then not registered, so the agent cannot see or call them.
+
+In normal mode, every tool carries MCP tool annotations (`readOnlyHint`, `destructiveHint`) so clients can ask the user before a write. `suspend_cluster` and `delete_entities` also need a second call with `confirm=true`: the first call only returns a preview and the impact.
+
 ## 5. Available Tools
 
 The server exposes two categories of tools for your AI agents.
