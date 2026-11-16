@@ -224,6 +224,9 @@ async def describe_collection(
         Use rowCount to answer "how many rows/entities does collection X have" - the
         cluster metric ENTITIES_COUNT is the total across all collections of the cluster.
         rowCount is omitted (with a note) if the stats call fails.
+        rowCount is approximate: right after inserts or deletes it can still include rows that
+        were deleted or not yet flushed. For an exact count, use query with
+        output_fields=["count(*)"].
         Example (full envelope, hints omitted):
         {
             "data": {
