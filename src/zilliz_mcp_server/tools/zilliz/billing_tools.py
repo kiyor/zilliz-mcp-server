@@ -2,7 +2,7 @@
 
 import logging
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, List, Optional
 from zilliz_mcp_server.common import hints, openapi_client
@@ -234,6 +234,15 @@ async def get_usage_summary(
             notes.append(f"by_cost_type is left out per day for ranges over {LONG_RANGE_DAYS} days to keep the "
                          "result small; use group_by=month for monthly cost by cost_type, or a range of "
                          f"{LONG_RANGE_DAYS} days or less for daily detail.")
+        if group_by == 'month':
+            start_day, end_day = date.fromisoformat(start), date.fromisoformat(end)
+            partial = [m for m, is_partial in (
+                (start[:7], start_day.day != 1),
+                (end[:7], (end_day + timedelta(days=1)).day != 1),
+            ) if is_partial]
+            if partial:
+                notes.append(f"Partial month(s) {', '.join(sorted(set(partial)))}: only days from {start} to {end} "
+                             "are counted, so do not compare them with full months.")
 
         def share(amount: Decimal) -> float:
             return float((amount / total * 100).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)) if total else 0.0
