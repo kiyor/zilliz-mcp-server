@@ -174,7 +174,8 @@ def classify_error(tool: str, exc: Exception, ctx: Optional[Dict[str, Any]] = No
             who_can_grant=_who_grants(resource),
             required_role=_role_needed(resource, action),
             message_for_admin=_admin_message(tool, resource, action),
-            next_steps=[step(tool, "Retry the same call (same arguments) once the permission is granted.",
+            next_steps=[step(tool, "Retry your previous call unchanged once the permission is granted "
+                                   "(args lists only the identifying arguments).",
                              **_clean(ctx))],
         )
     if (http_status == 401 or code in (21119, 1800)
