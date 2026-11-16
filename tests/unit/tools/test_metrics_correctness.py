@@ -1,0 +1,148 @@
+"""Tests for query_cluster_metrics validation and null interpretation."""
+
+import json
+from unittest.mock import patch
+
+import pytest
+
+from zilliz_mcp_server.tools.zilliz import metrics as m
+
+
+def _resp(*results):
+    return {"code": 0, "data": {"results": list(results)}}
+
+
+def _series(name, values, unit="percent"):
+    ts = ["2024-06-30T16:00:00Z", "2024-06-30T16:05:00Z", "2024-06-30T16:10:00Z"]
+    return {"name": name, "stat": "AVG", "unit": unit,
+            "values": [{"timestamp": t, "value": v} for t, v in zip(ts, values)]}
+
+
+class TestValidation:
+    @pytest.mark.parametrize("bad", ["REQ_SUCCESS_RATE", "REQ_FAIL_RATE", "ENTITIES_INSERT_RATE",
+                                     "REQ_BULK_INSERT_LATENCY_P99", "NOT_A_METRIC"])
+    def test_rejected_names_fail_locally_with_valid_list(self, bad):
+        with pytest.raises(ValueError) as e:
+            m.validate_metric_queries([{"metricName": bad, "stat": "AVG"}])
+        msg = str(e.value)
+        assert "Valid metric names:" in msg
+        assert "REQ_FAIL_RATE_SEARCH" in msg
+        assert bad not in m.METRICS
+
+    def test_success_rate_points_to_per_operation_fail_rate(self):
+        with pytest.raises(ValueError, match="100 - fail rate"):
+            m.validate_metric_queries([{"metricName": "REQ_SUCCESS_RATE"}])
+
+    def test_stat_defaults_to_avg_and_name_is_normalized(self):
+        assert m.validate_metric_queries([{"metricName": "req_search_count"}]) == [
+            {"name": "REQ_SEARCH_COUNT", "stat": "AVG"}]
+
+    def test_p99_allowed_only_for_p99_latency(self):
+        assert m.validate_metric_queries([{"metricName": "REQ_SEARCH_LATENCY_P99", "stat": "P99"}])[0]["stat"] == "P99"
+        with pytest.raises(ValueError, match="Valid stat values for REQ_SEARCH_COUNT: AVG"):
+            m.validate_metric_queries([{"metricName": "REQ_SEARCH_COUNT", "stat": "P99"}])
+        with pytest.raises(ValueError, match="REQ_SEARCH_LATENCY_P99"):
+            m.validate_metric_queries([{"metricName": "REQ_SEARCH_LATENCY_AVG", "stat": "P99"}])
+
+    def test_unknown_stat_rejected(self):
+        with pytest.raises(ValueError, match="Valid stat values"):
+            m.validate_metric_queries([{"metricName": "CU_COMPUTATION", "stat": "MEDIAN"}])
+
+    def test_empty_queries_rejected(self):
+        with pytest.raises(ValueError, match="metric_queries is empty"):
+            m.validate_metric_queries([])
+
+    def test_paired_count(self):
+        assert m.paired_count_metric("REQ_FAIL_RATE_SEARCH") == "REQ_SEARCH_COUNT"
+        assert m.paired_count_metric("REQ_QUERY_LATENCY_P99") == "REQ_QUERY_COUNT"
+        assert m.paired_count_metric("REQ_FAIL_RATE_BULK_INSERT") == "REQ_BULK_INSERT_COUNT"
+        assert m.paired_count_metric("CU_COMPUTATION") is None
+
+
+class TestNullInterpretation:
+    def test_fail_rate_null_with_traffic_is_no_failures(self):
+        fail = _series("REQ_FAIL_RATE_SEARCH", [None, None, "2.5"])
+        counts = m.series_by_timestamp([_series("REQ_SEARCH_COUNT", ["0", "7.4", "6.8"], "qps")])
+        m.annotate([fail], counts)
+        assert [p["value_status"] for p in fail["values"]] == ["no_requests", "no_failures", "reported"]
+        assert fail["null_points"] == 2
+        assert "REQ_SEARCH_COUNT" in fail["null_note"]
+
+    def test_latency_null_without_traffic_is_no_requests(self):
+        lat = _series("REQ_SEARCH_LATENCY_P99", [None, "5.4", None], "millisecond")
+        counts = m.series_by_timestamp([_series("REQ_SEARCH_COUNT", [None, "7.4", "0"], "qps")])
+        m.annotate([lat], counts)
+        assert [p["value_status"] for p in lat["values"]] == ["no_requests", "reported", "no_requests"]
+
+    def test_zero_is_reported_not_null(self):
+        cnt = _series("REQ_SEARCH_COUNT", ["0", "0", "0"], "qps")
+        m.annotate([cnt], {})
+        assert all(p["value_status"] == "reported" for p in cnt["values"])
+        assert "null_note" not in cnt
+
+    def test_unexplained_null_gets_verification_note(self):
+        cu = _series("CU_COMPUTATION", [None, "1.3", "1.4"])
+        m.annotate([cu], {})
+        assert cu["values"][0]["value_status"] == "no_data"
+        assert "NOT" in cu["null_note"] or "not 0" in cu["null_note"]
+        assert "CU_COMPUTATION" in cu["null_note"]
+
+
+@pytest.mark.asyncio
+class TestToolIntegration:
+    @patch('zilliz_mcp_server.tools.zilliz.zilliz_tools.openapi_client')
+    async def test_invalid_metric_never_calls_api(self, mock_client):
+        from zilliz_mcp_server.tools.zilliz.zilliz_tools import query_cluster_metrics
+        with pytest.raises(Exception, match="Valid metric names"):
+            await query_cluster_metrics(cluster_id="in01-x", period="PT1H",
+                                        metric_queries=[{"metricName": "REQ_SUCCESS_RATE", "stat": "AVG"}])
+        mock_client.control_plane_api_request.assert_not_called()
+
+    @patch('zilliz_mcp_server.tools.zilliz.zilliz_tools.openapi_client')
+    async def test_fail_rate_nulls_trigger_paired_count_lookup(self, mock_client):
+        from zilliz_mcp_server.tools.zilliz.zilliz_tools import query_cluster_metrics
+        mock_client.control_plane_api_request.side_effect = [
+            _resp(_series("REQ_FAIL_RATE_SEARCH", [None, None, None])),
+            _resp(_series("REQ_SEARCH_COUNT", ["0", "7.4", None], "qps")),
+        ]
+        out = json.loads(await query_cluster_metrics(
+            cluster_id="in01-x", period="PT15M", granularity="PT5M",
+            metric_queries=[{"metricName": "REQ_FAIL_RATE_SEARCH"}]))
+        res = out["data"]["results"]
+        assert len(res) == 1  # the helper series is not added to the output
+        assert [p["value_status"] for p in res[0]["values"]] == ["no_requests", "no_failures", "no_requests"]
+        second = mock_client.control_plane_api_request.call_args_list[1]
+        assert second.kwargs["body_map"] == {"granularity": "PT5M", "period": "PT15M",
+                                             "metricQueries": [{"name": "REQ_SEARCH_COUNT", "stat": "AVG"}]}
+
+    @patch('zilliz_mcp_server.tools.zilliz.zilliz_tools.openapi_client')
+    async def test_paired_count_already_requested_is_reused(self, mock_client):
+        from zilliz_mcp_server.tools.zilliz.zilliz_tools import query_cluster_metrics
+        mock_client.control_plane_api_request.return_value = _resp(
+            _series("REQ_FAIL_RATE_SEARCH", [None, "1", None]),
+            _series("REQ_SEARCH_COUNT", ["3", "3", "0"], "qps"))
+        out = json.loads(await query_cluster_metrics(
+            cluster_id="in01-x", period="PT15M",
+            metric_queries=[{"metricName": "REQ_FAIL_RATE_SEARCH"}, {"metricName": "REQ_SEARCH_COUNT"}]))
+        assert mock_client.control_plane_api_request.call_count == 1
+        statuses = [p["value_status"] for p in out["data"]["results"][0]["values"]]
+        assert statuses == ["no_failures", "reported", "no_requests"]
+
+    @patch('zilliz_mcp_server.tools.zilliz.zilliz_tools.openapi_client')
+    async def test_paired_lookup_failure_falls_back_to_note(self, mock_client):
+        from zilliz_mcp_server.tools.zilliz.zilliz_tools import query_cluster_metrics
+        mock_client.control_plane_api_request.side_effect = [
+            _resp(_series("REQ_FAIL_RATE_QUERY", [None, None, None])), Exception("boom")]
+        out = json.loads(await query_cluster_metrics(
+            cluster_id="in01-x", period="PT15M", metric_queries=[{"metricName": "REQ_FAIL_RATE_QUERY"}]))
+        r = out["data"]["results"][0]
+        assert {p["value_status"] for p in r["values"]} == {"no_data"}
+        assert "not 0" in r["null_note"]
+
+    @patch('zilliz_mcp_server.tools.zilliz.zilliz_tools.openapi_client')
+    async def test_vcu_error_is_explained(self, mock_client):
+        from zilliz_mcp_server.tools.zilliz.zilliz_tools import query_cluster_metrics
+        mock_client.control_plane_api_request.side_effect = Exception("Business error: Bad request.")
+        with pytest.raises(Exception, match="Serverless clusters"):
+            await query_cluster_metrics(cluster_id="in01-x", period="PT1H",
+                                        metric_queries=[{"metricName": "READ_VCU"}])
