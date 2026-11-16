@@ -38,12 +38,31 @@ class TestFailRateCaveat:
     def test_present_with_fail_rate_series(self):
         note = m.fail_rate_caveat([{"name": "REQ_SEARCH_COUNT"}, {"name": "REQ_FAIL_RATE_SEARCH"}])
         assert note == m.FAIL_RATE_CAVEAT
-        assert "rate limiting" in note and "0% fail rate does not prove" in note
+        assert "may not count requests rejected by rate limiting or write quotas" in note
+        assert "0% does not prove nothing was rejected" in note
         assert "client logs" in note
+        assert len(note) <= 350  # kept short: notes are capped and emitted before data
 
     def test_absent_without_fail_rate_series(self):
         assert m.fail_rate_caveat([{"name": "CU_COMPUTATION"}]) is None
         assert m.fail_rate_caveat([]) is None
+
+
+class TestCoverageIgnoresAlwaysReported:
+    def _hourly(self, present):
+        return [{"timestamp": f"t{i}", "value": "1" if i in present else None} for i in range(168)]
+
+    def test_full_cu_size_does_not_hide_sparse_series(self):
+        res = [{"name": "CU_SIZE", "values": self._hourly(set(range(168)))},
+               {"name": "CU_CAPACITY", "values": self._hourly({5, 100})}]
+        q = [{"metricName": "CU_SIZE", "stat": "AVG"}, {"metricName": "CU_CAPACITY", "stat": "AVG"}]
+        steps, notes = m.coverage_hints(res, "in01-abc", q, "PT1H", "P7D", None, None)
+        assert notes and steps
+
+    def test_cu_size_alone_is_still_judged(self):
+        res = [{"name": "CU_SIZE", "values": self._hourly(set(range(168)))}]
+        q = [{"metricName": "CU_SIZE", "stat": "AVG"}]
+        assert m.coverage_hints(res, "in01-abc", q, "PT1H", "P7D", None, None) == ([], [])
 
 
 class TestDiagnosticsCuSize:

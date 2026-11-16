@@ -404,11 +404,11 @@ async def query_cluster_metrics(
               Failure rate (percent, per operation): REQ_FAIL_RATE_INSERT, REQ_FAIL_RATE_BULK_INSERT,
                 REQ_FAIL_RATE_UPSERT, REQ_FAIL_RATE_DELETE, REQ_FAIL_RATE_SEARCH, REQ_FAIL_RATE_QUERY.
                 There is no overall success/fail rate metric; success rate = 100 - fail rate.
-                Requests rejected by rate limiting are not counted as failures here (Milvus checks
-                rate limits before the request handler), so 0% does not prove that no request was
-                rate-limited; check client-side errors. Each bucket averages over its whole interval
-                (30 s at best), so a few seconds of errors show as a lower rate spread over several
-                buckets, and the peak can come after the errors stopped; use client logs to time
+                Requests rejected by rate limiting or write quotas may not be counted as failures
+                (open-source Milvus rejects them before the request handler), so 0% does not prove
+                nothing was rejected; check client-side errors. Each bucket averages its whole
+                interval (30 s at best), so a few seconds of errors show as a lower rate spread over
+                several buckets and can peak after the errors stopped; use client logs to time
                 short incidents.
               Data: ENTITIES_COUNT, ENTITIES_LOADED, ENTITIES_INDEXED, COLLECTIONS_COUNT,
                 UNLOADED_COLLECTIONS_COUNT, FLUSH_COUNT (per minute)
