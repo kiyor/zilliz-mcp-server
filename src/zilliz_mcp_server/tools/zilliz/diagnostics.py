@@ -117,8 +117,8 @@ def assess(name: str, kind: str, cur: Dict[str, Any], counts: Dict[str, Dict[str
                     "basis": f"Failed requests reported (max {cur['max']}% of requests in a bucket)."}
         return {"status": "no_failures",
                 "basis": "Fail rate was 0 in every bucket that reported a value. Requests rejected by rate "
-                         "limiting are not counted as failures, so this does not rule out rate limiting; "
-                         "check client-side errors."}
+                         "limiting or write quotas may not be counted as failures, so this does not rule "
+                         "out throttling; check client-side errors."}
     return {"status": "not_judged", "basis": NOT_JUDGED_BASIS}
 
 

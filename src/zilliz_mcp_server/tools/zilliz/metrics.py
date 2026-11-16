@@ -393,12 +393,15 @@ GAUGE_PREFIXES = ("CU_", "STORAGE_", "CLUSTER_WRITE_CAPACITY", "ENTITIES_")
 
 
 FAIL_RATE_CAVEAT = (
-    "REQ_FAIL_RATE_* does not count requests rejected by rate limiting (Milvus checks rate limits "
-    "before the request handler), so a 0% fail rate does not prove no requests were rate-limited; "
-    "check client-side errors. Each bucket averages its whole interval, so a few seconds of errors "
-    "show as a lower rate spread over several buckets and can peak after the errors stopped; do not "
-    "line it up second by second with client errors, use client logs to time short incidents."
+    "REQ_FAIL_RATE_* may not count requests rejected by rate limiting or write quotas (open-source "
+    "Milvus rejects them before the request handler), so 0% does not prove nothing was rejected; check "
+    "client-side errors. Buckets average their interval, so brief errors look smaller, longer and later: "
+    "time short incidents from client logs."
 )
+
+# Configuration-like series that report a value in every bucket regardless of sampling; they say
+# nothing about whether a coarse query lost data, so coverage is judged without them.
+ALWAYS_REPORTED = ("CU_SIZE", "REPLICA_COUNT")
 
 
 def fail_rate_caveat(results: List[Dict[str, Any]]) -> Optional[str]:
@@ -473,7 +476,8 @@ def coverage_hints(results: List[Dict[str, Any]], cluster_id: str, metric_querie
     total = reported = 0
     # Latency / fail-rate are legitimately null without requests (see value_status); judge sampling
     # on the other series when there are any.
-    base = [r for r in results if not paired_count_metric(r.get("name", ""))] or results
+    base = [r for r in results if not paired_count_metric(r.get("name", ""))
+            and r.get("name") not in ALWAYS_REPORTED] or results
     for r in base:
         zeros = suspect_zero_buckets(r, granularity)
         for p in r.get("values") or []:
