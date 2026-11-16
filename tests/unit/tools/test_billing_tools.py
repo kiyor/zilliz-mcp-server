@@ -17,14 +17,6 @@ def _data(result: str):
     return json.loads(result)["data"]
 
 
-@pytest.fixture(autouse=True)
-def mock_zilliz_mcp():
-    """Mock the zilliz_mcp app for testing."""
-    with patch('zilliz_mcp_server.tools.zilliz.billing_tools.zilliz_mcp') as mock_app:
-        mock_app.tool.return_value = lambda func: func  # Return function unchanged
-        yield mock_app
-
-
 def _item(cost_type, amount, cluster_id="in01-a", project_id="proj-1", region_id="aws-us-west-2"):
     return {
         "costType": cost_type,

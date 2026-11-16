@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, List, Optional
 from zilliz_mcp_server.common import hints, openapi_client
-from zilliz_mcp_server.app import zilliz_mcp, read_tool
+from zilliz_mcp_server.app import read_tool
 from zilliz_mcp_server.common.budget import RESULT_BUDGET
 
 # Configure logging
@@ -366,7 +366,6 @@ async def query_daily_usage(
 
         filtered = cluster_id or project_id
         days = []
-        budget = MAX_LINE_ITEMS
         for bucket in results:
             items = [item for item in bucket.get('items') or [] if _item_matches(item, cluster_id, project_id)]
             total = float(sum((_decimal(item.get('amount')) for item in items), Decimal(0))) if filtered else bucket.get('total')
@@ -380,8 +379,6 @@ async def query_daily_usage(
                 'by_cost_type': {k: _money(v) for k, v in sorted(by_cost_type.items(), key=lambda kv: kv[1], reverse=True)},
             }
             if filtered:
-                shown = items[:budget]
-                budget -= len(shown)
                 day['items'] = [
                     {
                         'cost_type': item.get('costType'),
@@ -392,40 +389,42 @@ async def query_daily_usage(
                         'unit_price': (item.get('price') or {}).get('unitPrice'),
                         'amount': item.get('amount'),
                     }
-                    for item in shown
+                    for item in items
                 ]
-                if len(items) > len(shown):
-                    day['items_truncated'] = len(items) - len(shown)
             days.append(day)
 
-        # Keep the result inside the shared response budget: keep line items in date order until
-        # the JSON reaches RESULT_BUDGET; daily totals and by_cost_type always stay.
+        # Cap line items by count (MAX_LINE_ITEMS) and by size (RESULT_BUDGET), keeping the newest
+        # days' items first; daily totals and by_cost_type always stay for every day.
         notes = []
-        if filtered and budget_size(days) > RESULT_BUDGET:
+        if filtered:
+            count_left = MAX_LINE_ITEMS
             used = budget_size([{k: v for k, v in d.items() if k != 'items'} for d in days])
-            for day in days:
-                items = day.get('items', [])
+            for day in reversed(days):
+                items = day['items']
                 keep = 0
                 for item in items:
                     cost = budget_size(item) + 2  # item plus separator
-                    if used + cost > RESULT_BUDGET:
+                    if keep >= count_left or used + cost > RESULT_BUDGET:
                         break
                     used += cost
                     keep += 1
+                count_left -= keep
                 if keep < len(items):
-                    day['items_truncated'] = day.get('items_truncated', 0) + len(items) - keep
+                    day['items_truncated'] = len(items) - keep
                     day['items'] = items[:keep]
-                    used += len(', "items_truncated": 000000, "items": []')
-            # The running count is an estimate; trim from the end until the real size fits.
+                    used += len(', "items_truncated": 000000')
+            # The running size is an estimate; drop items from the oldest days until it really fits.
             while budget_size(days) > RESULT_BUDGET:
-                day = next((d for d in reversed(days) if d.get('items')), None)
+                day = next((d for d in days if d.get('items')), None)
                 if day is None:
                     break
                 day['items'].pop()
                 day['items_truncated'] = day.get('items_truncated', 0) + 1
-            notes.append(f"Line items were cut to keep the result under {RESULT_BUDGET // 1000} KB "
-                         f"(see items_truncated per day); daily totals and by_cost_type are "
-                         f"complete. Narrow start/end or filter by cluster_id to see more items.")
+            if any('items_truncated' in d for d in days):
+                notes.append(f"Line items were capped ({MAX_LINE_ITEMS} items or "
+                             f"{RESULT_BUDGET // 1000} KB), keeping the newest days first; see "
+                             f"items_truncated per day. Daily totals and by_cost_type are complete "
+                             f"for every day. Narrow start/end to see the earlier days' items.")
 
         # Log results
         logger.info(f"QUERY_DAILY_USAGE RESULT: returned {len(days)} days")

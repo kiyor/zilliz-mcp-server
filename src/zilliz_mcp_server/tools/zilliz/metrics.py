@@ -240,9 +240,9 @@ def api_error_fix(names: List[str]) -> Optional[str]:
 # Buckets per series per request. Observed: 28,800 accepted, 40,320 rejected (error 20011).
 MAX_POINTS = 25000
 # Points (all series together) that a suggested re-query may return so the model can read the
-# whole result: the shared response budget divided by ~90 bytes per point (observed 80-85 bytes
-# per point including value_status). With RESULT_BUDGET = 45 KB this is 500 points.
-READABLE_POINTS = RESULT_BUDGET // 90
+# whole result: the shared response budget divided by ~100 bytes per point (observed 80-85 bytes
+# per point including value_status).
+READABLE_POINTS = RESULT_BUDGET // 100
 # Finer-to-coarser granularities to suggest when re-querying.
 GRANULARITY_LADDER = ["PT30S", "PT1M", "PT2M", "PT5M", "PT10M", "PT15M", "PT30M", "PT1H", "P1D"]
 # Below this share of buckets with a value, a coarse query is treated as possibly under-sampled.

@@ -153,7 +153,7 @@ class TestNextSteps:
 
     def test_describe_collection_builds_search_args(self):
         data = {
-            "collectionName": "agnews",
+            "collectionName": "my_collection",
             "fields": [
                 {"name": "id", "type": "Int64", "primaryKey": True},
                 {"name": "text", "type": "VarChar"},

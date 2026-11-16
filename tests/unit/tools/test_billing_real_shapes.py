@@ -70,10 +70,17 @@ class TestUsageSize:
         # Size, not only item count, is capped by the shared budget; totals stay for every day.
         assert len(json.dumps(days)) <= billing_tools.RESULT_BUDGET
         assert all("by_cost_type" in d and "total" in d for d in days)
-        if shown < billing_tools.MAX_LINE_ITEMS:
-            assert any("items_truncated" in n for n in out.get("notes", []))
-        props = days[0]["items"][0]["properties"]
+        assert any("items_truncated" in n and "newest days first" in n for n in out.get("notes", []))
+        # The newest day keeps its items; the oldest days are the ones cut.
+        assert days[-1]["items"] and not days[0]["items"]
+        props = days[-1]["items"][0]["properties"]
         assert None not in props.values() and "volumeName" not in props
+
+    def test_daily_with_filter_small_result_untouched(self, mock_client):
+        mock_client.control_plane_api_request.return_value = _usage(days=2, per_day=5)
+        out = json.loads(_call("query_daily_usage", start="2026-11-01", end="2026-11-02",
+                               project_id="proj-1"))
+        assert "notes" not in out and all("items_truncated" not in d for d in out["data"])
 
     def test_summary_limits_groups_and_rolls_up_other(self, mock_client):
         mock_client.control_plane_api_request.return_value = _usage(days=1)
