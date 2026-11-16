@@ -115,7 +115,10 @@ async def test_tool_returns_coverage_hint(client):
     assert out["next_steps"][0]["args"]["granularity"] == "PT30S"
     assert any("does NOT mean no traffic" in n for n in out["notes"])
     assert out["notes"][0].startswith("Per series: REQ_SEARCH_COUNT: 1/4 buckets with a value")
-    assert out["data"]["results"][0]["values"][0]["value_status"] == "no_data"
+    r0 = out["data"]["results"][0]
+    assert [x["status"] for x in r0["null_runs"]] == ["no_data", "no_data"]
+    assert [x["points"] for x in r0["null_runs"]] == [2, 1]
+    assert [p["value"] for p in r0["values"]] == ["2.0"]
 
 
 def test_fail_rate_nulls_do_not_trigger_when_counts_are_covered():

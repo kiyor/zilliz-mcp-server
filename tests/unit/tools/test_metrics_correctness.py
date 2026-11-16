@@ -115,7 +115,8 @@ class TestToolIntegration:
             metric_queries=[{"metricName": "REQ_FAIL_RATE_SEARCH"}]))
         res = out["data"]["results"]
         assert len(res) == 1  # the helper series is not added to the output
-        assert [p["value_status"] for p in res[0]["values"]] == ["no_requests", "unknown_or_no_failures", "no_data"]
+        assert [r["status"] for r in res[0]["null_runs"]] == ["no_requests", "unknown_or_no_failures", "no_data"]
+        assert res[0]["values"] == [] and res[0]["buckets"] == 3 and res[0]["null_points"] == 3
         second = mock_client.control_plane_api_request.call_args_list[1]
         assert second.kwargs["body_map"] == {"granularity": "PT5M", "period": "PT15M",
                                              "metricQueries": [{"name": "REQ_SEARCH_COUNT", "stat": "AVG"}]}
@@ -130,8 +131,10 @@ class TestToolIntegration:
             cluster_id="in01-x", period="PT15M",
             metric_queries=[{"metricName": "REQ_FAIL_RATE_SEARCH"}, {"metricName": "REQ_SEARCH_COUNT"}]))
         assert mock_client.control_plane_api_request.call_count == 1
-        statuses = [p["value_status"] for p in out["data"]["results"][0]["values"]]
-        assert statuses == ["unknown_or_no_failures", "reported", "no_requests"]
+        r0 = out["data"]["results"][0]
+        assert [r["status"] for r in r0["null_runs"]] == ["unknown_or_no_failures", "no_requests"]
+        assert [p["value"] for p in r0["values"]] == ["1"]
+        assert "value_status" not in r0["values"][0]
 
     @patch('zilliz_mcp_server.tools.zilliz.zilliz_tools.openapi_client')
     async def test_paired_lookup_failure_falls_back_to_note(self, mock_client):
@@ -141,7 +144,8 @@ class TestToolIntegration:
         out = json.loads(await query_cluster_metrics(
             cluster_id="in01-x", period="PT15M", metric_queries=[{"metricName": "REQ_FAIL_RATE_QUERY"}]))
         r = out["data"]["results"][0]
-        assert {p["value_status"] for p in r["values"]} == {"no_data"}
+        assert r["null_runs"] == [{"status": "no_data", "from": r["null_runs"][0]["from"],
+                                   "to": r["null_runs"][0]["to"], "points": 3}]
         assert "not 0" in r["null_note"]
 
     @patch('zilliz_mcp_server.tools.zilliz.zilliz_tools.openapi_client')
