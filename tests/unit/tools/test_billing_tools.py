@@ -12,6 +12,11 @@ from unittest.mock import patch
 pytestmark = pytest.mark.asyncio
 
 
+def _data(result: str):
+    """Unwrap the hints.ok envelope."""
+    return json.loads(result)["data"]
+
+
 @pytest.fixture(autouse=True)
 def mock_zilliz_mcp():
     """Mock the zilliz_mcp app for testing."""
@@ -117,7 +122,7 @@ class TestGetUsageSummary:
 
         mock_client.control_plane_api_request.return_value = usage_response
 
-        result = json.loads(await get_usage_summary("2026-09-16", "2026-09-17"))
+        result = _data(await get_usage_summary("2026-09-16", "2026-09-17"))
 
         assert result["currency"] == "USD"
         assert result["group_by"] == "cluster"
@@ -139,7 +144,7 @@ class TestGetUsageSummary:
             "data": {"results": [_bucket("2026-09-16", [_item("compute", 0.004)] * 3)]},
         }
 
-        result = json.loads(await get_usage_summary("2026-09-16", "2026-09-16"))
+        result = _data(await get_usage_summary("2026-09-16", "2026-09-16"))
 
         assert result["total"] == 0.01
 
@@ -155,7 +160,7 @@ class TestGetUsageSummary:
 
         mock_client.control_plane_api_request.return_value = usage_response
 
-        result = json.loads(await get_usage_summary("2026-09-16", "2026-09-17", group_by=group_by))
+        result = _data(await get_usage_summary("2026-09-16", "2026-09-17", group_by=group_by))
 
         assert sorted(g["key"] for g in result["groups"]) == expected_keys
 
@@ -165,7 +170,7 @@ class TestGetUsageSummary:
 
         mock_client.control_plane_api_request.return_value = usage_response
 
-        result = json.loads(await get_usage_summary("2026-09-16", "2026-09-17", group_by="cost_type"))
+        result = _data(await get_usage_summary("2026-09-16", "2026-09-17", group_by="cost_type"))
 
         assert all("by_cost_type" not in g for g in result["groups"])
 
@@ -183,7 +188,7 @@ class TestGetUsageSummary:
 
         mock_client.control_plane_api_request.return_value = usage_response
 
-        result = json.loads(await get_usage_summary(
+        result = _data(await get_usage_summary(
             "2026-09-16", "2026-09-17", group_by="cost_type", cluster_id="in01-b"))
 
         assert result["total"] == 4.25
@@ -195,7 +200,7 @@ class TestGetUsageSummary:
 
         mock_client.control_plane_api_request.return_value = usage_response
 
-        result = json.loads(await get_usage_summary("2026-09-16", "2026-09-17", project_id="proj-1"))
+        result = _data(await get_usage_summary("2026-09-16", "2026-09-17", project_id="proj-1"))
 
         assert result["total"] == 20.62
         assert [g["key"] for g in result["groups"]] == ["in01-a"]
@@ -210,7 +215,7 @@ class TestGetUsageSummary:
             "code": 0, "data": {"results": [_bucket("2026-09-16", [item])]},
         }
 
-        result = json.loads(await get_usage_summary("2026-09-16", "2026-09-16"))
+        result = _data(await get_usage_summary("2026-09-16", "2026-09-16"))
 
         assert result["groups"][0]["key"] == "unattributed"
 
@@ -220,7 +225,7 @@ class TestGetUsageSummary:
 
         mock_client.control_plane_api_request.return_value = {"code": 0, "data": {"results": []}}
 
-        result = json.loads(await get_usage_summary("2026-09-16", "2026-09-17"))
+        result = _data(await get_usage_summary("2026-09-16", "2026-09-17"))
 
         assert result["total"] == 0
         assert result["groups"] == []
@@ -231,7 +236,7 @@ class TestGetUsageSummary:
 
         mock_client.control_plane_api_request.side_effect = Exception("Business error: permission denied")
 
-        with pytest.raises(Exception, match="Failed to get usage summary"):
+        with pytest.raises(Exception, match="PERMISSION_DENIED"):
             await get_usage_summary("2026-09-16", "2026-09-17")
 
 
@@ -244,7 +249,7 @@ class TestQueryDailyUsage:
 
         mock_client.control_plane_api_request.return_value = usage_response
 
-        result = json.loads(await query_daily_usage("2026-09-16", "2026-09-17"))
+        result = _data(await query_daily_usage("2026-09-16", "2026-09-17"))
 
         assert [d["day"] for d in result] == ["2026-09-16", "2026-09-17"]
         assert result[0]["currency"] == "USD"
@@ -258,7 +263,7 @@ class TestQueryDailyUsage:
 
         mock_client.control_plane_api_request.return_value = usage_response
 
-        result = json.loads(await query_daily_usage("2026-09-16", "2026-09-17", cluster_id="in01-a"))
+        result = _data(await query_daily_usage("2026-09-16", "2026-09-17", cluster_id="in01-a"))
 
         assert result[0]["total"] == 10.6234567891
         assert all(i["properties"]["clusterId"] == "in01-a" for d in result for i in d["items"])
@@ -303,7 +308,7 @@ class TestInvoices:
             "data": {"count": 1, "currentPage": 1, "pageSize": 10, "invoices": [self.INVOICE]},
         }
 
-        result = json.loads(await list_invoices())
+        result = _data(await list_invoices())
 
         mock_client.control_plane_api_request.assert_called_once_with(
             "/v2/invoices", params_map={"pageSize": 10, "currentPage": 1})
@@ -320,7 +325,7 @@ class TestInvoices:
 
         mock_client.control_plane_api_request.return_value = {"code": 0, "data": self.INVOICE}
 
-        result = json.loads(await describe_invoice("inv-123"))
+        result = _data(await describe_invoice("inv-123"))
 
         mock_client.control_plane_api_request.assert_called_once_with("/v2/invoices/inv-123", method="GET")
         assert result["invoice_id"] == "inv-123"
@@ -333,5 +338,5 @@ class TestInvoices:
 
         mock_client.control_plane_api_request.side_effect = Exception("Business error: not found")
 
-        with pytest.raises(Exception, match="Failed to describe invoice"):
+        with pytest.raises(Exception, match="Business error: not found"):
             await describe_invoice("inv-missing")
