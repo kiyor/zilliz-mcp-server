@@ -94,6 +94,24 @@ class TestClassifyError:
         e.http_status = 403
         assert classify_error("x", e)["error"] == "PERMISSION_DENIED"
 
+    def test_missing_acl_permission(self):
+        # Verbatim shape of GET /v2/invoices with a key lacking billing access (HTTP 200, code 96041).
+        e = ZillizAPIError("Missing ACL permission: orgId=org-xxxx, resource=billing, action=view", code=96041)
+        p = classify_error("x", e)
+        assert p["error"] == "PERMISSION_DENIED"
+        assert p["got"] == "resource=billing, action=view"
+        assert p["missing_permission"] == "billing:view"
+        assert "Billing Admin" in p["who_can_grant"]
+        assert "API Keys" in p["message_for_admin"] and "billing:view" in p["message_for_admin"]
+        assert "Tell the user" in p["fix"]
+        assert p["next_steps"][0]["tool"] == "x"
+
+    def test_permission_denied_retry_keeps_args(self):
+        e = ZillizAPIError("Missing ACL permission: orgId=o, resource=cluster, action=view", code=96041)
+        p = classify_error("describe_cluster", e, {"cluster_id": CID})
+        assert p["next_steps"][0] == {"tool": "describe_cluster", "args": {"cluster_id": CID},
+                                      "why": p["next_steps"][0]["why"]}
+
     def test_unknown_keeps_message(self):
         p = classify_error("x", Exception("weird"))
         assert p["error"] == "INTERNAL_ERROR" and p["message"] == "weird"

@@ -87,6 +87,39 @@ def _clean(d: Dict[str, Any]) -> Dict[str, Any]:
 _DIM_RE = re.compile(r"dimension:\s*(\d+),\s*but length of \[\]float:\s*(\d+)")
 _FIELD_RE = re.compile(r"field not found\[field=([^\]]+)\]|field (\S+) not exist")
 _CLUSTER_ID_RE = re.compile(r"^in\d+-[0-9a-z]+$")
+_ACL_RE = re.compile(r"resource=([\w-]+),\s*action=([\w-]+)")
+
+# API error code for "Missing ACL permission" (HTTP 200, body code 96041).
+_CODE_MISSING_ACL = 96041
+
+
+def _permission_fix(resource: Optional[str], action: Optional[str]) -> str:
+    what = f"'{action}' on '{resource}'" if resource and action else "this operation"
+    return (f"The API key is valid but is not allowed to perform {what}. Tell the user: {_who_grants(resource)} "
+            f"must grant this API key {_role_needed(resource, action)} in the Zilliz Cloud console "
+            f"(Organization > API Keys > edit this key's role), or configure the MCP server with a key that "
+            f"already has it. Retrying with other arguments will not help; retry the same call after it is granted.")
+
+
+def _who_grants(resource: Optional[str]) -> str:
+    if resource == "billing":
+        return "an Organization Owner or Organization Billing Admin"
+    return "an Organization Owner (or a Project Admin of the cluster's project)"
+
+
+def _role_needed(resource: Optional[str], action: Optional[str]) -> str:
+    if resource == "billing":
+        return "an organization role with billing access (Organization Owner or Organization Billing Admin)"
+    if resource:
+        return f"a role that grants '{action or 'access'}' on '{resource}'"
+    return "a role that allows this operation"
+
+
+def _admin_message(tool: str, resource: Optional[str], action: Optional[str]) -> str:
+    perm = f"'{resource}:{action}'" if resource and action else f"the permission needed for '{tool}'"
+    return (f"Hi, could you grant our Zilliz Cloud API key {_role_needed(resource, action)}? It currently lacks "
+            f"{perm}. You can change it in the Zilliz Cloud console under Organization > API Keys "
+            f"(edit the key and update its role). Thanks!")
 
 
 def classify_error(tool: str, exc: Exception, ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -116,16 +149,32 @@ def classify_error(tool: str, exc: Exception, ctx: Optional[Dict[str, Any]] = No
         return _clean({"error": kind, "message": short, **kw})
 
     # --- authentication / authorization -------------------------------------
-    if (http_status in (401, 403) or code in (21119, 1800)
-            or "apikey is illegal" in low or "authenticated" in low
-            or "permission" in low or "denied" in low or "unauthorized" in low):
-        kind = "PERMISSION_DENIED" if (http_status == 403 or "permission" in low or "denied" in low) else "AUTH_FAILED"
+    if http_status == 403 or code == _CODE_MISSING_ACL or "missing acl permission" in low \
+            or "permission" in low or "denied" in low:
+        acl = _ACL_RE.search(message)
+        resource, action = (acl.group(1), acl.group(2)) if acl else (None, None)
         return build(
-            kind,
+            "PERMISSION_DENIED",
             field="ZILLIZ_CLOUD_TOKEN",
-            expected="a valid Zilliz Cloud API key with access to this project/cluster",
-            fix="Check the ZILLIZ_CLOUD_TOKEN environment variable of the MCP server; the key may be invalid, "
-                "revoked, or lack the role needed for this operation. Retrying with other arguments will not help.",
+            expected=f"an API key whose role allows '{action}' on '{resource}'" if acl
+            else "an API key whose role allows this operation",
+            got=f"resource={resource}, action={action}" if acl else None,
+            fix=_permission_fix(resource, action),
+            missing_permission=f"{resource}:{action}" if acl else None,
+            who_can_grant=_who_grants(resource),
+            message_for_admin=_admin_message(tool, resource, action),
+            next_steps=[step(tool, "Retry the same call (same arguments) once the permission is granted.",
+                             **_clean(ctx))],
+        )
+    if (http_status == 401 or code in (21119, 1800)
+            or "apikey is illegal" in low or "authenticated" in low
+            or "unauthorized" in low):
+        return build(
+            "AUTH_FAILED",
+            field="ZILLIZ_CLOUD_TOKEN",
+            expected="a valid, unrevoked Zilliz Cloud API key",
+            fix="The API key was rejected (invalid, expired or revoked). Tell the user to set a valid key in the "
+                "ZILLIZ_CLOUD_TOKEN environment variable of the MCP server. Retrying with other arguments will not help.",
         )
 
     # --- argument validation done locally -----------------------------------
