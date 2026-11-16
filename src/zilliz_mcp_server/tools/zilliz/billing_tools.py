@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from collections import defaultdict
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
@@ -19,6 +20,30 @@ MAX_SUMMARY_DAYS = 366
 MAX_RAW_DAYS = 7
 
 UNATTRIBUTED = "unattributed"
+
+# Business code returned (with HTTP 200) when the API key's user lacks billing access,
+# e.g. {"code": 96041, "message": "Missing ACL permission: ..., resource=billing, action=view"}.
+PERMISSION_DENIED_CODE = 96041
+
+PERMISSION_DENIED_FIX = (
+    "The user that owns this API key needs the Billing Admin (or Organization Owner) organization role. "
+    "An Organization Owner grants it in the Zilliz Cloud console: open the organization > Access Control > "
+    "Members tab > click the pen icon (Edit Role) next to the user > add the Billing Admin role > save "
+    "(see https://docs.zilliz.com/docs/manage-platform-users). Then retry the same tool call. "
+    "Until then, do not estimate or guess amounts."
+)
+
+ADMIN_MESSAGE_TEMPLATE = (
+    "Hi, I need read access to billing data in our Zilliz Cloud organization (missing permission: {perm}). "
+    "Could an Organization Owner open the Zilliz Cloud console > Access Control > Members, click Edit Role "
+    "next to my user, and add the Billing Admin role? Thanks."
+)
+
+INVOICE_AMOUNT_UNIT_NOTE = (
+    "Amounts are returned exactly as the API reports them. The API documentation does not state "
+    "whether they are whole currency units or minor units (e.g. cents); confirm against the "
+    "invoice in the Zilliz Cloud console before quoting a figure."
+)
 
 _GROUP_KEYS = {
     'cluster': lambda bucket, item: item.get('properties', {}).get('clusterId'),
@@ -100,6 +125,62 @@ def _format_invoice(invoice: Dict[str, Any]) -> Dict[str, Any]:
     return {field: invoice.get(source) for field, source in _INVOICE_FIELDS.items()}
 
 
+def _is_permission_denied(error: Exception) -> bool:
+    """True when the API rejected the call because the key lacks billing access."""
+    for exc in (error, getattr(error, '__cause__', None)):
+        if exc is None:
+            continue
+        if getattr(exc, 'code', None) == PERMISSION_DENIED_CODE:
+            return True
+        response = getattr(exc, 'response', None)
+        if getattr(response, 'status_code', None) in (401, 403):
+            return True
+        text = str(exc)
+        if str(PERMISSION_DENIED_CODE) in text or 'Missing ACL permission' in text:
+            return True
+    return False
+
+
+def _missing_permission(message: str) -> str:
+    """Extract 'resource:action' (e.g. billing:view) from the API's ACL error text."""
+    resource = re.search(r"resource=([\w.-]+)", message)
+    action = re.search(r"action=([\w.-]+)", message)
+    if resource and action:
+        return f"{resource.group(1)}:{action.group(1)}"
+    return "billing:view"
+
+
+def _billing_error(tool: str, error: Exception, fallback: str, args: Optional[Dict[str, Any]] = None) -> Exception:
+    """Turn a billing API failure into an actionable error for the agent.
+
+    Permission failures become a JSON error that says what permission is missing,
+    who can grant it, where, what to retry, and a message the user can forward to
+    their admin. Other failures keep the original message.
+    """
+    if _is_permission_denied(error):
+        message = str(error)
+        perm = _missing_permission(message)
+        if len(message) > 300:
+            message = message[:300] + "..."
+        payload = {
+            'error': 'PERMISSION_DENIED',
+            'message': message,
+            'field': 'ZILLIZ_CLOUD_TOKEN',
+            'missing_permission': perm,
+            'who_can_grant': 'An Organization Owner of the Zilliz Cloud organization',
+            'required_role': 'Billing Admin (or Organization Owner)',
+            'fix': PERMISSION_DENIED_FIX,
+            'next_steps': [{
+                'tool': tool,
+                'args': {k: v for k, v in (args or {}).items() if v is not None},
+                'why': 'Retry with the same arguments after the Billing Admin role has been granted.',
+            }],
+            'message_for_admin': ADMIN_MESSAGE_TEMPLATE.format(perm=perm),
+        }
+        return Exception(json.dumps(payload))
+    return Exception(f"{fallback}: {str(error)}")
+
+
 @zilliz_mcp.tool()
 async def get_usage_summary(
     start: str,
@@ -112,7 +193,12 @@ async def get_usage_summary(
     Summarize Zilliz Cloud billing usage (cost) for the organization over a date range.
     Prefer this tool for cost questions such as "what did cluster X cost last month"
     or "what is my biggest cost driver". Requires an API key belonging to an
-    organization owner or billing admin.
+    organization owner or billing admin; otherwise it fails with error PERMISSION_DENIED,
+    and you should tell the user how to get access instead of estimating costs.
+
+    Usage is the metered cost (quantity x unit price) BEFORE credits, discounts, advance
+    pay and tax are applied, so it can differ from what was invoiced or paid. Use
+    list_invoices for invoiced totals (usage_amount, credits_applied, total).
 
     Presenting results: report amounts exactly as returned and cite the currency; do not
     recompute them. Figures come straight from Zilliz Cloud billing data and have not
@@ -210,7 +296,9 @@ async def get_usage_summary(
 
     except Exception as e:
         logger.error(f"GET_USAGE_SUMMARY ERROR: {str(e)}")
-        raise Exception(f"Failed to get usage summary: {str(e)}") from e
+        raise _billing_error("get_usage_summary", e, "Failed to get usage summary",
+                             {'start': start, 'end': end, 'group_by': group_by,
+                              'cluster_id': cluster_id, 'project_id': project_id}) from e
 
 
 @zilliz_mcp.tool()
@@ -224,7 +312,10 @@ async def query_daily_usage(
     Query raw daily billing usage line items for the organization. Use this when you
     need per-day detail (e.g. to chart daily cost); for totals and breakdowns prefer
     get_usage_summary. Requires an API key belonging to an organization owner or
-    billing admin.
+    billing admin; otherwise it fails with error PERMISSION_DENIED.
+
+    Amounts are metered usage BEFORE credits, discounts, advance pay and tax, not the
+    invoiced amount. Use list_invoices for invoiced totals.
 
     Presenting results: report amounts exactly as returned and cite the currency; do not
     recompute them. Figures come straight from Zilliz Cloud billing data and have not
@@ -303,14 +394,16 @@ async def query_daily_usage(
 
     except Exception as e:
         logger.error(f"QUERY_DAILY_USAGE ERROR: {str(e)}")
-        raise Exception(f"Failed to query daily usage: {str(e)}") from e
+        raise _billing_error("query_daily_usage", e, "Failed to query daily usage",
+                             {'start': start, 'end': end, 'cluster_id': cluster_id,
+                              'project_id': project_id}) from e
 
 
 @zilliz_mcp.tool()
 async def list_invoices(page_size: int = 10, current_page: int = 1) -> str:
     """
     List the organization's invoices in Zilliz Cloud. Requires an API key belonging to
-    an organization owner or billing admin.
+    an organization owner or billing admin; otherwise it fails with error PERMISSION_DENIED.
 
     Args:
         page_size: The number of invoices to include in each response (default: 10)
@@ -322,6 +415,7 @@ async def list_invoices(page_size: int = 10, current_page: int = 1) -> str:
             "count": 1,
             "current_page": 1,
             "page_size": 10,
+            "amount_unit_note": "Amounts are returned exactly as the API reports them. ...",
             "invoices": [
                 {
                     "invoice_id": "inv-xxxxxxxxxxxxxxx",
@@ -343,8 +437,12 @@ async def list_invoices(page_size: int = 10, current_page: int = 1) -> str:
                 }
             ]
         }
-        status is one of: unbilled, unconfirmed, disputed, unpaid, overdue, paid, free.
-        Amounts are whole units of the invoice currency (e.g. 883850 means $883,850), not cents.
+        status is one of: unbilled, unconfirmed, disputed, unpaid, overdue, paid, void.
+        Amounts are passed through unchanged. The API documentation does not say whether they
+        are whole currency units or minor units (cents), so do not convert them; quote them with
+        that caveat or confirm against the console invoice.
+        usage_amount is metered usage before credits; total / amount_due reflect credits,
+        advance pay and tax.
         The current period's invoice has status "unbilled" and its amounts are still accruing.
 
     """
@@ -365,6 +463,7 @@ async def list_invoices(page_size: int = 10, current_page: int = 1) -> str:
             'count': data.get('count', len(invoices)),
             'current_page': data.get('currentPage', current_page),
             'page_size': data.get('pageSize', page_size),
+            'amount_unit_note': INVOICE_AMOUNT_UNIT_NOTE,
             'invoices': invoices,
         }
 
@@ -375,19 +474,22 @@ async def list_invoices(page_size: int = 10, current_page: int = 1) -> str:
 
     except Exception as e:
         logger.error(f"LIST_INVOICES ERROR: {str(e)}")
-        raise Exception(f"Failed to list invoices: {str(e)}") from e
+        raise _billing_error("list_invoices", e, "Failed to list invoices",
+                             {'page_size': page_size, 'current_page': current_page}) from e
 
 
 @zilliz_mcp.tool()
 async def describe_invoice(invoice_id: str) -> str:
     """
     Describe an invoice in detail. Requires an API key belonging to an organization
-    owner or billing admin.
+    owner or billing admin; otherwise it fails with error PERMISSION_DENIED.
 
     Args:
         invoice_id: ID of the invoice to describe (from list_invoices)
     Returns:
         Dict containing the invoice, with the same fields as each entry of list_invoices.
+        It also includes amount_unit_note: amounts are passed through unchanged and their unit
+        (whole currency units vs cents) is not documented.
         The API currently returns a server error for the current "unbilled" invoice;
         use list_invoices to read that one.
 
@@ -398,6 +500,7 @@ async def describe_invoice(invoice_id: str) -> str:
 
         response = openapi_client.control_plane_api_request(f"/v2/invoices/{invoice_id}", method="GET")
         invoice = _format_invoice(response.get('data') or {})
+        invoice['amount_unit_note'] = INVOICE_AMOUNT_UNIT_NOTE
 
         # Log results
         logger.info(f"DESCRIBE_INVOICE RESULT: status={invoice['status']}, total={invoice['total']}")
@@ -406,4 +509,5 @@ async def describe_invoice(invoice_id: str) -> str:
 
     except Exception as e:
         logger.error(f"DESCRIBE_INVOICE ERROR: {str(e)}")
-        raise Exception(f"Failed to describe invoice: {str(e)}") from e
+        raise _billing_error("describe_invoice", e, "Failed to describe invoice",
+                             {'invoice_id': invoice_id}) from e
