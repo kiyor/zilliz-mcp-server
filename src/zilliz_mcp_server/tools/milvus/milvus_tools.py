@@ -22,7 +22,7 @@ async def list_databases(cluster_id: str, region_id: str) -> str:
         cluster_id: ID of the cluster
         region_id: ID of the cloud region hosting the cluster
     Returns:
-        JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
+        JSON {"notes": [...], "next_steps": [{"tool", "args", "why"}], "data": <result>};
         next_steps/notes are present only when useful. On failure the error text is JSON
         {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
         <result>:
@@ -72,7 +72,7 @@ async def list_collections(cluster_id: str, region_id: str, db_name: str = "") -
         region_id: ID of the cloud region hosting the cluster
         db_name: The name of an existing database. Pass explicit dbName or leave empty when cluster is free or serverless
     Returns:
-        JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
+        JSON {"notes": [...], "next_steps": [{"tool", "args", "why"}], "data": <result>};
         next_steps/notes are present only when useful. On failure the error text is JSON
         {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
         <result>:
@@ -141,7 +141,7 @@ async def create_collection(
         primary_field_name: The name of the primary field (default: "id")
         vector_field_name: The name of the vector field (default: "vector")
     Returns:
-        JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
+        JSON {"notes": [...], "next_steps": [{"tool", "args", "why"}], "data": <result>};
         next_steps/notes are present only when useful. On failure the error text is JSON
         {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
         <result>:
@@ -215,7 +215,7 @@ async def describe_collection(
         collection_name: The name of the collection to describe
         db_name: The name of the database. Pass explicit dbName or leave empty when cluster is free or serverless
     Returns:
-        JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
+        JSON {"notes": [...], "next_steps": [{"tool", "args", "why"}], "data": <result>};
         next_steps/notes are present only when useful. On failure the error text is JSON
         {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
         <result>:
@@ -323,7 +323,7 @@ async def insert_entities(
         data: An entity object or an array of entity objects. Note that the keys in an entity object should match the collection schema
         db_name: The name of the target database. Pass explicit dbName or leave empty when cluster is free or serverless
     Returns:
-        JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
+        JSON {"notes": [...], "next_steps": [{"tool", "args", "why"}], "data": <result>};
         next_steps/notes are present only when useful. On failure the error text is JSON
         {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
         <result>:
@@ -394,7 +394,7 @@ async def delete_entities(
         db_name: The name of the target database. Pass explicit dbName or leave empty when cluster is free or serverless
         partition_name: The name of a partition in the current collection. If specified, the data is to be deleted from the specified partition
     Returns:
-        JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
+        JSON {"notes": [...], "next_steps": [{"tool", "args", "why"}], "data": <result>};
         next_steps/notes are present only when useful. On failure the error text is JSON
         {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
         <result>:
@@ -482,7 +482,7 @@ async def search(
         partition_names: The name of the partitions to which this operation applies
         consistency_level: The consistency level of the search operation (Strong, Eventually, Bounded)
     Returns:
-        JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
+        JSON {"notes": [...], "next_steps": [{"tool", "args", "why"}], "data": <result>};
         next_steps/notes are present only when useful. On failure the error text is JSON
         {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
         <result>:
@@ -603,7 +603,7 @@ async def query(
         limit: The total number of entities to return (default: 100). The sum of this value and offset should be less than 16,384
         offset: The number of records to skip in the search result. The sum of this value and limit should be less than 16,384
     Returns:
-        JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
+        JSON {"notes": [...], "next_steps": [{"tool", "args", "why"}], "data": <result>};
         next_steps/notes are present only when useful. On failure the error text is JSON
         {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
         <result>:
@@ -717,7 +717,7 @@ async def hybrid_search(
         output_fields: An array of fields to return along with the search results
         consistency_level: The consistency level of the search operation (Strong, Eventually, Bounded)
     Returns:
-        JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
+        JSON {"notes": [...], "next_steps": [{"tool", "args", "why"}], "data": <result>};
         next_steps/notes are present only when useful. On failure the error text is JSON
         {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
         <result>:
