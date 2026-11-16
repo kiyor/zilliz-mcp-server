@@ -371,8 +371,17 @@ async def query_cluster_metrics(
         cluster_id: ID of the target cluster
         start: Start time, ISO 8601 UTC timestamp, e.g. "2024-06-30T16:00:00Z" (use together with end)
         end: End time, ISO 8601 UTC timestamp (use together with start)
-        period: Lookback duration in ISO 8601, e.g. "PT1H", "P1D" (use instead of start/end)
-        granularity: Bucket size in ISO 8601 duration format, minimum PT30S (e.g. PT1M, PT5M, PT1H)
+        period: Lookback duration in ISO 8601 using D/H/M/S units, e.g. "PT1H", "P1D", "P7D", "P180D"
+            (use instead of start/end). Week and month units such as "P2W" or "P6M" are rejected;
+            write 6 months as "P180D".
+        granularity: Bucket size in ISO 8601, minimum PT30S (e.g. PT30S, PT1M, PT5M, PT1H, P1D).
+            Choose it with care: each bucket is reported at its timestamp, not aggregated over the
+            bucket, so coarse buckets (PT1H, P1D) can miss short or bursty traffic and return null
+            even when there was activity. Use the finest granularity that keeps
+            window / granularity under about 25,000 buckets (requests with roughly 40,000 buckets
+            fail with an unknown error), e.g. PT30S up to 7 days, PT2M for 30 days, PT10M-PT15M
+            for 180 days. For long-range trends query the long window, then confirm recent activity
+            with a short window at PT30S.
         metric_queries: List of objects {"metricName": <name>, "stat": "AVG"}. 'stat' is optional
             and defaults to AVG. The API ignores stat for aggregation: each bucket holds the value of
             the named metric. Latency percentiles are chosen by the metric NAME (..._LATENCY_AVG vs
@@ -443,6 +452,11 @@ async def query_cluster_metrics(
             body['start'] = start
             body['end'] = end
         elif period:
+            if metrics_catalog.duration_seconds(period) is None:
+                raise ValueError(
+                    f"period '{period}' is not supported. Use an ISO 8601 duration with D/H/M/S units, "
+                    "e.g. 'PT1H', 'P1D', 'P7D', 'P30D', 'P180D' (6 months = 'P180D'; W and month units "
+                    "are rejected by the API).")
             body['period'] = period
         else:
             raise ValueError("Either provide both 'start' and 'end', or provide 'period' (e.g. \"PT1H\")")
@@ -480,7 +494,10 @@ async def query_cluster_metrics(
 
         logger.info(f"QUERY_CLUSTER_METRICS RESULT: returned {len(results)} metric results")
 
-        return hints.ok(data, *ns.query_cluster_metrics(data, cluster_id))
+        steps, notes = ns.query_cluster_metrics(data, cluster_id)
+        cov_steps, cov_notes = metrics_catalog.coverage_hints(
+            results, cluster_id, metric_queries, granularity, period, start, end)
+        return hints.ok(data, cov_steps + steps, cov_notes + notes)
 
     except Exception as e:
         logger.error(f"QUERY_CLUSTER_METRICS ERROR: {str(e)}")
