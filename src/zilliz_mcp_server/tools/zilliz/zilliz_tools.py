@@ -456,7 +456,8 @@ async def query_cluster_metrics(
             structured = hints.tool_error("query_cluster_metrics", api_err,
                                           {"cluster_id": cluster_id, "metric_queries": metric_queries})
             extra_fix = metrics_catalog.api_error_fix(names)
-            if extra_fix:
+            # Only for a generic rejection; keep PERMISSION_DENIED / AUTH_FAILED / ... advice intact.
+            if extra_fix and structured.payload.get("error") == "API_ERROR":
                 structured = hints.StructuredToolError(
                     {**structured.payload, "field": "metric_queries", "fix": extra_fix})
             raise structured from api_err

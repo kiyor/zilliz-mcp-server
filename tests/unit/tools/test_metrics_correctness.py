@@ -147,8 +147,23 @@ class TestToolIntegration:
     @patch('zilliz_mcp_server.tools.zilliz.zilliz_tools.openapi_client')
     async def test_vcu_error_is_explained(self, mock_client):
         from zilliz_mcp_server.tools.zilliz.zilliz_tools import query_cluster_metrics
-        mock_client.control_plane_api_request.side_effect = Exception("Business error: Bad request.")
+        from zilliz_mcp_server.common.hints import ZillizAPIError
+        mock_client.control_plane_api_request.side_effect = ZillizAPIError("Bad request.", code=100)
         with pytest.raises(StructuredToolError, match="Serverless clusters") as e:
             await query_cluster_metrics(cluster_id="in01-x", period="PT1H",
                                         metric_queries=[{"metricName": "READ_VCU"}])
         assert e.value.payload["field"] == "metric_queries"
+
+    @patch('zilliz_mcp_server.tools.zilliz.zilliz_tools.openapi_client')
+    async def test_vcu_note_does_not_hide_auth_or_permission_advice(self, mock_client):
+        from zilliz_mcp_server.common.hints import ZillizAPIError
+        from zilliz_mcp_server.tools.zilliz.zilliz_tools import query_cluster_metrics
+        for err, kind in ((ZillizAPIError("The apikey is illegal", code=21119, http_status=401), "AUTH_FAILED"),
+                          (ZillizAPIError("Missing ACL permission: resource=cluster, action=view",
+                                          code=96041), "PERMISSION_DENIED")):
+            mock_client.control_plane_api_request.side_effect = err
+            with pytest.raises(StructuredToolError) as e:
+                await query_cluster_metrics(cluster_id="in01-x", period="PT1H",
+                                            metric_queries=[{"metricName": "READ_VCU"}])
+            assert e.value.payload["error"] == kind
+            assert "Serverless" not in e.value.payload.get("fix", "")
