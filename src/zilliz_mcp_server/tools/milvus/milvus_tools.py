@@ -4,6 +4,7 @@ import logging
 from typing import Dict, Any, List, Optional, Union
 from zilliz_mcp_server.common import openapi_client
 from zilliz_mcp_server.common import hints
+from zilliz_mcp_server.common import budget
 from zilliz_mcp_server.common import next_steps as ns
 from zilliz_mcp_server.settings import config
 from zilliz_mcp_server.app import zilliz_mcp
@@ -11,6 +12,55 @@ from zilliz_mcp_server.app import zilliz_mcp
 # Configure logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+_dp_args = ns._dp
+
+
+def _default_scalar_fields(cluster_id: str, region_id: str, db_name: str,
+                           collection_name: str) -> "tuple[Optional[List[str]], List[str]]":
+    """(non-vector field names, vector field names) for a query without output_fields.
+
+    Returns (None, []) when the schema cannot be read, so the API default applies.
+    """
+    body: Dict[str, Any] = {"collectionName": collection_name}
+    if db_name:
+        body["dbName"] = db_name
+    try:
+        response = openapi_client.data_plane_api_request(
+            uri="/v2/vectordb/collections/describe", cluster_id=cluster_id,
+            region_id=region_id, body_map=body, method="POST")
+    except Exception as e:  # the query itself will report real problems
+        logger.info(f"describe before query failed, using API default output: {e}")
+        return None, []
+    data = response.get("data") if isinstance(response, dict) else None
+    if not isinstance(data, dict):
+        return None, []
+    fields = budget.scalar_fields(data)
+    if not fields:
+        return None, []
+    vectors = [f.get("name") for f in data.get("fields", [])
+               if isinstance(f, dict) and f.get("type") in budget.VECTOR_TYPES]
+    return fields, vectors
+
+
+def _budgeted(tool: str, results: Any, steps: List[Dict[str, Any]], notes: List[str],
+              output_fields: Optional[List[str]], call_args: Dict[str, Any], paged: bool) -> str:
+    """hints.ok(...) with rows trimmed to budget.RESULT_BUDGET and a note/next step if trimmed."""
+    kept, info = budget.fit_rows(results)
+    if info is None:
+        return hints.ok(results, steps, notes)
+    extra = []
+    lean = budget.leaner_fields(results, output_fields)
+    if lean:
+        extra.append(hints.step(tool, "Same call without vector fields, so every row fits.",
+                                **{**call_args, "output_fields": lean}))
+    if paged and not lean and info["returned"] < info["total"]:
+        args = {**call_args, "offset": call_args.get("offset", 0) + info["returned"],
+                "limit": info["total"] - info["returned"]}
+        if output_fields:
+            args["output_fields"] = lean or output_fields
+        extra.append(hints.step(tool, "Fetch the rows that were trimmed.", **args))
+    return hints.ok(kept, extra + list(steps), [budget.trimmed_note(tool, info)] + list(notes))
 
 
 @zilliz_mcp.tool()
@@ -506,7 +556,9 @@ async def search(
         filter: The filter used to find matches for the search
         offset: The number of records to skip in the search result. The sum of this value and limit should be less than 16,384
         grouping_field: The name of the field that serves as the aggregation criteria
-        output_fields: An array of fields to return along with the search results
+        output_fields: An array of fields to return along with the search results. Default returns only
+            id and distance. Avoid "*" or vector fields unless you need raw embeddings: a 1024-dim
+            vector is ~14 KB of JSON per hit, and results over ~45 KB are trimmed (see notes).
         metric_type: The name of the metric type that applies to the current search (L2, IP, COSINE)
         search_params: Extra search parameters including radius and range_filter
         partition_names: The name of the partitions to which this operation applies
@@ -597,8 +649,12 @@ async def search(
         results_count = len(results)
         logger.info(f"SEARCH RESULT: {results_count} results found")
         
-        return hints.ok(results, *ns.search(results, cluster_id, region_id, db_name, collection_name,
-                                            filter, output_fields))
+        steps, notes = ns.search(results, cluster_id, region_id, db_name, collection_name,
+                                 filter, output_fields)
+        return _budgeted("search", results, steps, notes, output_fields, {
+            **_dp_args(cluster_id, region_id, db_name), "collection_name": collection_name,
+            "data": "<same query vectors>", "anns_field": anns_field, "filter": filter,
+            "limit": limit, "offset": offset}, paged=True)
         
     except Exception as e:
         logger.error(f"SEARCH ERROR: {str(e)}")
@@ -628,7 +684,9 @@ async def query(
         collection_name: The name of the collection to which this operation applies
         filter: The filter used to find matches for the search
         db_name: The name of the database. Pass explicit dbName or leave empty when cluster is free or serverless
-        output_fields: An array of fields to return along with the query results
+        output_fields: An array of fields to return along with the query results. If omitted, all
+            non-vector fields are returned (vector fields are left out; name them explicitly, or pass
+            ["*"], to get raw embeddings). Results over ~45 KB of JSON are trimmed (see notes).
         partition_names: The name of the partitions to which this operation applies. If not set, the operation applies to all partitions in the collection
         limit: The total number of entities to return (default: 100). The sum of this value and offset should be less than 16,384
         offset: The number of records to skip in the search result. The sum of this value and limit should be less than 16,384
@@ -672,9 +730,14 @@ async def query(
         if db_name:
             body["dbName"] = db_name
             
-        # Add outputFields only if provided
+        # Add outputFields only if provided; otherwise leave vector fields out by default
+        omitted_vectors: List[str] = []
         if output_fields:
             body["outputFields"] = output_fields
+        else:
+            fields, omitted_vectors = _default_scalar_fields(cluster_id, region_id, db_name, collection_name)
+            if fields:
+                body["outputFields"] = fields
             
         # Add partitionNames only if provided
         if partition_names:
@@ -698,8 +761,14 @@ async def query(
         results_count = len(results)
         logger.info(f"QUERY RESULT: {results_count} entities found")
         
-        return hints.ok(results, *ns.query(results, cluster_id, region_id, db_name, collection_name,
-                                           filter, limit, offset, output_fields))
+        steps, notes = ns.query(results, cluster_id, region_id, db_name, collection_name,
+                                filter, limit, offset, output_fields)
+        if omitted_vectors and results:
+            notes = [f"Vector field(s) {', '.join(omitted_vectors)} omitted by default; pass them in "
+                     f"output_fields to get the raw embeddings."] + list(notes)
+        return _budgeted("query", results, steps, notes, output_fields, {
+            **_dp_args(cluster_id, region_id, db_name), "collection_name": collection_name,
+            "filter": filter, "limit": limit, "offset": offset}, paged=True)
         
     except Exception as e:
         logger.error(f"QUERY ERROR: {str(e)}")
@@ -744,7 +813,8 @@ async def hybrid_search(
         limit: The total number of entities to return. The sum of this value and offset should be less than 16,384
         db_name: The name of the database. Pass explicit dbName or leave empty when cluster is free or serverless
         partition_names: The name of the partitions to which this operation applies
-        output_fields: An array of fields to return along with the search results
+        output_fields: An array of fields to return along with the search results. Avoid vector
+            fields unless you need raw embeddings; results over ~45 KB of JSON are trimmed (see notes).
         consistency_level: The consistency level of the search operation (Strong, Eventually, Bounded)
     Returns:
         JSON {"notes": [...], "next_steps": [{"tool", "args", "why"}], "data": <result>};
@@ -811,7 +881,11 @@ async def hybrid_search(
         results_count = len(results)
         logger.info(f"HYBRID_SEARCH RESULT: {results_count} results found")
         
-        return hints.ok(results, *ns.hybrid_search(results))
+        steps, notes = ns.hybrid_search(results)
+        return _budgeted("hybrid_search", results, steps, notes, output_fields, {
+            **_dp_args(cluster_id, region_id, db_name), "collection_name": collection_name,
+            "search_requests": "<same search_requests>", "rerank_strategy": rerank_strategy,
+            "rerank_params": rerank_params, "limit": limit}, paged=False)
         
     except Exception as e:
         logger.error(f"HYBRID_SEARCH ERROR: {str(e)}")

@@ -441,7 +441,10 @@ class TestQuery:
             "filter": "id > 0",
             "limit": 100
         }
-        mock_client.data_plane_api_request.assert_called_once_with(
+        # Without output_fields the tool first reads the schema (to leave vectors out); this mock's
+        # describe response has no field list, so the API default output is kept.
+        assert mock_client.data_plane_api_request.call_count == 2
+        mock_client.data_plane_api_request.assert_called_with(
             uri="/v2/vectordb/entities/query",
             cluster_id="cluster1",
             region_id="region1",
