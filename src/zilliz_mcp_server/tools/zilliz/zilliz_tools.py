@@ -7,13 +7,19 @@ from zilliz_mcp_server.common import openapi_client
 from zilliz_mcp_server.common import hints
 from zilliz_mcp_server.common import next_steps as ns
 from zilliz_mcp_server.settings import config
-from zilliz_mcp_server.app import zilliz_mcp
+from zilliz_mcp_server.app import zilliz_mcp, read_tool, write_tool
 
 # Configure logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-@zilliz_mcp.tool()
+SUSPEND_IMPACT = (
+    "Suspending stops the cluster from serving: all reads, writes and searches fail until "
+    "resume_cluster is called, and resuming takes several minutes. Compute billing stops; "
+    "storage is still billed."
+)
+
+@read_tool()
 async def list_projects() -> str:
     """
     List all projects scoped to API Key in Zilliz Cloud.
@@ -58,7 +64,7 @@ async def list_projects() -> str:
         raise hints.tool_error("list_projects", e) from e
 
 
-@zilliz_mcp.tool()
+@read_tool()
 async def list_clusters(page_size: int = 10, current_page: int = 1) -> str:
     """
     List all clusters scoped to API Key in Zilliz Cloud.
@@ -134,11 +140,13 @@ async def list_clusters(page_size: int = 10, current_page: int = 1) -> str:
         logger.error(f"LIST_CLUSTERS ERROR: {str(e)}")
         raise hints.tool_error("list_clusters", e) from e
 
-@zilliz_mcp.tool()
+@write_tool(destructive=False)
 async def create_free_cluster(cluster_name: str, project_id: str) -> str:
     """
-    Create a free cluster in Zilliz Cloud.
-    
+    Create a free cluster in Zilliz Cloud. This creates a new resource; only call it when
+    the user asks for a new cluster. Each organization has a limited free-cluster quota,
+    so the call can fail when it is used up. Get project_id from list_projects.
+
     Args:
         cluster_name: Name of the cluster to create
         project_id: ID of the project to which the cluster belongs
@@ -193,7 +201,7 @@ async def create_free_cluster(cluster_name: str, project_id: str) -> str:
         logger.error(f"CREATE_FREE_CLUSTER ERROR: {str(e)}")
         raise hints.tool_error("create_free_cluster", e, {"project_id": project_id}) from e
 
-@zilliz_mcp.tool()
+@read_tool()
 async def describe_cluster(cluster_id: str) -> str:
     """
     Describe a cluster in detail.
@@ -264,19 +272,30 @@ async def describe_cluster(cluster_id: str) -> str:
         logger.error(f"DESCRIBE_CLUSTER ERROR: {str(e)}")
         raise hints.tool_error("describe_cluster", e, {"cluster_id": cluster_id}) from e
 
-@zilliz_mcp.tool()
-async def suspend_cluster(cluster_id: str) -> str:
+@write_tool(destructive=True, idempotent=True)
+async def suspend_cluster(cluster_id: str, confirm: bool = False) -> str:
     """
-    Suspend a dedicated cluster in Zilliz Cloud.
-    
+    Suspend a dedicated cluster in Zilliz Cloud. DESTRUCTIVE TO AVAILABILITY: once
+    suspended, the cluster rejects all reads and writes until resume_cluster is called,
+    and resuming takes several minutes. Compute billing stops; storage is still billed.
+    Only call this when the user explicitly asks to suspend this specific cluster_id; do
+    not suspend clusters to answer cost or billing questions.
+
+    Two steps: call with confirm=false (default) to get a preview of the cluster (name,
+    status, plan, CU size) and the impact, without changing anything. Show it to the user
+    and call again with confirm=true only after they confirm.
+
     Args:
         cluster_id: ID of the cluster to suspend
+        confirm: false (default) returns the preview only; true suspends the cluster
     Returns:
         JSON {"notes": [...], "next_steps": [{"tool", "args", "why"}], "data": <result>};
         next_steps/notes are present only when useful. On failure the error text is JSON
         {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
-        <result>:
-        Dict containing cluster suspension info
+        <result> with confirm=false:
+        {"confirm_required": true, "action": "suspend_cluster", "cluster": {"cluster_id",
+        "cluster_name", "status", "plan", "cu_size", "region_id"}, "impact": "..."}
+        <result> with confirm=true:
         Example:
         {
             "cluster_id": "inxx-xxxxxxxxxxxxxxx",
@@ -286,8 +305,27 @@ async def suspend_cluster(cluster_id: str) -> str:
     """
     try:
         # Log request
-        logger.info(f"SUSPEND_CLUSTER: cluster_id={cluster_id}")
-        
+        logger.info(f"SUSPEND_CLUSTER: cluster_id={cluster_id}, confirm={confirm}")
+
+        if confirm is not True:
+            data = openapi_client.control_plane_api_request(f"/v2/clusters/{cluster_id}", method="GET").get('data', {})
+            preview = {
+                'confirm_required': True,
+                'action': 'suspend_cluster',
+                'cluster': {
+                    'cluster_id': data.get('clusterId', cluster_id),
+                    'cluster_name': data.get('clusterName', 'Unknown'),
+                    'status': data.get('status', 'Unknown'),
+                    'plan': data.get('plan', 'Unknown'),
+                    'cu_size': data.get('cuSize', 0),
+                    'region_id': data.get('regionId', 'Unknown'),
+                },
+                'impact': SUSPEND_IMPACT,
+            }
+            return hints.ok(preview, [hints.step(
+                "suspend_cluster", "only after the user confirms they want this cluster suspended",
+                cluster_id=cluster_id, confirm=True)], ["Nothing was changed. Ask the user to confirm before re-calling with confirm=true."])
+
         # Build URI with cluster_id as path parameter
         uri = f"/v2/clusters/{cluster_id}/suspend"
         
@@ -309,11 +347,13 @@ async def suspend_cluster(cluster_id: str) -> str:
         logger.error(f"SUSPEND_CLUSTER ERROR: {str(e)}")
         raise hints.tool_error("suspend_cluster", e, {"cluster_id": cluster_id}) from e
 
-@zilliz_mcp.tool()
+@write_tool(destructive=False, idempotent=True)
 async def resume_cluster(cluster_id: str) -> str:
     """
-    Resume a dedicated cluster in Zilliz Cloud.
-    
+    Resume a suspended dedicated cluster in Zilliz Cloud. This restarts compute billing for
+    the cluster; only call it when the user asks to resume this specific cluster_id. The
+    cluster takes several minutes to reach RUNNING.
+
     Args:
         cluster_id: ID of the cluster to resume
     Returns:
@@ -354,7 +394,7 @@ async def resume_cluster(cluster_id: str) -> str:
         logger.error(f"RESUME_CLUSTER ERROR: {str(e)}")
         raise hints.tool_error("resume_cluster", e, {"cluster_id": cluster_id}) from e
 
-@zilliz_mcp.tool()
+@read_tool()
 async def query_cluster_metrics(
     cluster_id: str,
     start: Optional[str] = None,
