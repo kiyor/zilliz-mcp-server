@@ -416,9 +416,10 @@ async def query_cluster_metrics(
         JSON {"notes": [...], "next_steps": [{"tool", "args", "why"}], "data": <result>};
         next_steps/notes are present only when useful. On failure the error text is JSON
         {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
-        <result> is {"results": [...]}. Values are strings. Every point also
-        carries 'value_status':
-          - "reported": a real value (may be "0", meaning zero).
+        <result> is {"results": [...]}. Values are strings. 'values' lists only buckets that have
+        a value (may be "0", meaning zero); 'buckets' is the number of buckets in the series. Null
+        buckets are listed in 'null_runs' as {status, from, to, points} per run of consecutive
+        nulls, with status:
           - "unknown_or_no_failures": fail-rate is null but requests were served in that bucket.
             Usually nothing failed, but the metric cannot confirm it; do not report it as 0%.
           - "no_requests": latency / fail-rate is null and the request count was 0 in that bucket.
@@ -426,7 +427,9 @@ async def query_cluster_metrics(
             used); this is NOT zero.
         Results containing nulls also carry 'null_points' and a 'null_note' explaining them. For
         latency / fail-rate metrics the tool fetches the matching REQ_<OP>_COUNT for the same window
-        to tell these cases apart.
+        to tell these cases apart. If the result would exceed the response size budget, every
+        series keeps only its most recent buckets; a note says how many and next_steps gives the
+        re-query for the older part.
         Example:
         {
             "data": {
@@ -435,11 +438,13 @@ async def query_cluster_metrics(
                         "name": "REQ_FAIL_RATE_SEARCH",
                         "stat": "AVG",
                         "unit": "percent",
+                        "buckets": 2,
                         "values": [
-                            {"timestamp": "2024-06-30T16:05:00Z", "value": null, "value_status": "unknown_or_no_failures"},
-                            {"timestamp": "2024-06-30T16:10:00Z", "value": "0.50", "value_status": "reported"}
+                            {"timestamp": "2024-06-30T16:10:00Z", "value": "0.50"}
                         ],
                         "null_points": 1,
+                        "null_runs": [{"status": "unknown_or_no_failures", "from": "2024-06-30T16:05:00Z",
+                                       "to": "2024-06-30T16:05:00Z", "points": 1}],
                         "null_note": "..."
                     }
                 ]
@@ -514,8 +519,16 @@ async def query_cluster_metrics(
             results, cluster_id, metric_queries, granularity, period, start, end)
         summary = metrics_catalog.series_summary(results, granularity)
         caveat = metrics_catalog.fail_rate_caveat(results)
-        return hints.ok(data, cov_steps + steps,
-                        ([summary] if summary else []) + ([caveat] if caveat else []) + cov_notes + notes)
+        # Hints above are computed on the full result; the output is compacted and, if still over
+        # the shared response budget, trimmed to the most recent buckets.
+        data['results'], trim = metrics_catalog.fit_results(results)
+        trim_steps, trim_notes = [], []
+        if trim:
+            st, tn = metrics_catalog.trim_hints(trim, cluster_id, metric_queries, granularity)
+            trim_steps, trim_notes = ([st] if st else []), [tn]
+        return hints.ok(data, cov_steps + trim_steps + steps,
+                        ([summary] if summary else []) + trim_notes + cov_notes
+                        + ([caveat] if caveat else []) + notes)
 
     except Exception as e:
         logger.error(f"QUERY_CLUSTER_METRICS ERROR: {str(e)}")
