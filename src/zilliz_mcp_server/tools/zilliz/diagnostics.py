@@ -32,6 +32,9 @@ HEALTH_METRICS = [
     ("REQ_FAIL_RATE_SEARCH", "fail_rate", "percent"),
     ("REQ_FAIL_RATE_QUERY", "fail_rate", "percent"),
     ("REQ_FAIL_RATE_INSERT", "fail_rate", "percent"),
+    # Not in the published metric list, but accepted and observed to return values. A change
+    # marks a scaling step, a common trigger for sudden failures or latency changes.
+    ("CU_SIZE", "resource", "CUs"),
 ]
 
 _PAIRED_COUNT = {
@@ -73,6 +76,7 @@ def _stats(points: List[Dict[str, Any]]) -> Dict[str, Any]:
         "latest_at": present[-1][0],
         "avg": round(sum(nums) / len(nums), 4),
         "max": round(max(nums), 4),
+        "min": round(min(nums), 4),
     }
 
 
@@ -111,7 +115,10 @@ def assess(name: str, kind: str, cur: Dict[str, Any], counts: Dict[str, Dict[str
         if cur["max"] > 0:
             return {"status": "failures_seen",
                     "basis": f"Failed requests reported (max {cur['max']}% of requests in a bucket)."}
-        return {"status": "no_failures", "basis": "Fail rate was 0 in every bucket that reported a value."}
+        return {"status": "no_failures",
+                "basis": "Fail rate was 0 in every bucket that reported a value. Requests rejected by rate "
+                         "limiting or write quotas may not be counted as failures, so this does not rule "
+                         "out throttling; check client-side errors."}
     return {"status": "not_judged", "basis": NOT_JUDGED_BASIS}
 
 
@@ -191,6 +198,17 @@ def health_hints(report: Dict[str, Any], window: str) -> Any:
                           metric_queries=[{"metricName": n, "stat": "AVG"} for n, _ in moved[:3]]))
     if all(e["current"].get("points_with_data", 0) == 0 for e in m.values()):
         notes.append("No metric reported data in this window; the cluster may have been idle or not running.")
+    cu = m.get("CU_SIZE", {})
+    cu_cur, cu_prev = cu.get("current", {}), cu.get("previous") or {}
+    sizes = [v for v in (cu_prev.get("min"), cu_prev.get("max"), cu_cur.get("min"), cu_cur.get("max")) if v is not None]
+    if len(set(sizes)) > 1:
+        notes.insert(0, f"CU_SIZE changed in this period (between {min(sizes):g} and {max(sizes):g} CUs, latest "
+                        f"{cu_cur.get('latest', 'n/a')}): a scaling step. Compare its time with when failures or "
+                        "latency changed.")
+        steps.append(step("query_cluster_metrics", "See when the cluster size changed, next to failures.",
+                          cluster_id=cid, period=window, granularity=granularity,
+                          metric_queries=[{"metricName": "CU_SIZE", "stat": "AVG"}]
+                          + [{"metricName": n, "stat": "AVG"} for n in failing]))
     sparse = [n for n, e in m.items() if 0 < _coverage(e["current"]) < MIN_COVERAGE]
     if sparse and window in ("P1D", "P7D"):
         notes.append(f"{len(sparse)} metrics have data in few {granularity} buckets; at coarser granularity the "
@@ -215,7 +233,7 @@ async def get_cluster_health(cluster_id: str, window: str = "P1D", compare_previ
         window: Time window ending now: "PT1H", "PT6H", "P1D" (default) or "P7D"
         compare_previous: Also summarize the previous window of the same length (default: True)
     Returns:
-        JSON {"data": <report>, "next_steps": [...], "notes": [...]}; on failure the error text is JSON
+        JSON {"notes": [...], "next_steps": [...], "data": <report>}; on failure the error text is JSON
         {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
         <report>.metrics.<METRIC> = {"unit", "status", "basis", "current": {avg, max, latest, latest_at,
         points_with_data, points_total}, "previous": {...}, "change_percent"}.

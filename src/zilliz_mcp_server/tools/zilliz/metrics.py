@@ -23,6 +23,10 @@ METRICS: Dict[str, str] = {
     "CLUSTER_WRITE_CAPACITY": "Write capacity usage (percent)",
     "READ_VCU": "Read vCU consumption (Serverless clusters only)",
     "WRITE_VCU": "Write vCU consumption (Serverless clusters only)",
+    # Accepted by the metrics endpoint and observed to return values, but not in the published
+    # metric list. A change in CU_SIZE marks a scaling step (manual or autoscaling).
+    "CU_SIZE": "Cluster size in CUs (observed; not in the published metric list)",
+    "REPLICA_COUNT": "Number of replicas (observed; not in the published metric list)",
     # Request throughput
     "REQ_INSERT_COUNT": "Insert requests per second (qps)",
     "REQ_BULK_INSERT_COUNT": "Bulk insert requests per second (qps)",
@@ -297,6 +301,25 @@ def _readable_period(granularity: str, n_series: int, cap_s: int) -> Optional[st
 GAUGE_PREFIXES = ("CU_", "STORAGE_", "CLUSTER_WRITE_CAPACITY", "ENTITIES_")
 
 
+FAIL_RATE_CAVEAT = (
+    "REQ_FAIL_RATE_* may not count requests rejected by rate limiting or write quotas (open-source "
+    "Milvus rejects them before the request handler), so 0% does not prove nothing was rejected; check "
+    "client-side errors. Buckets average their interval, so brief errors look smaller, longer and later: "
+    "time short incidents from client logs."
+)
+
+# Configuration-like series that report a value in every bucket regardless of sampling; they say
+# nothing about whether a coarse query lost data, so coverage is judged without them.
+ALWAYS_REPORTED = ("CU_SIZE", "REPLICA_COUNT")
+
+
+def fail_rate_caveat(results: List[Dict[str, Any]]) -> Optional[str]:
+    """One note for any result that contains a REQ_FAIL_RATE_* series."""
+    if any(str(r.get("name", "")).startswith("REQ_FAIL_RATE_") for r in results or []):
+        return FAIL_RATE_CAVEAT
+    return None
+
+
 def suspect_zero_buckets(r: Dict[str, Any], granularity: Optional[str]) -> int:
     """Zero-valued buckets of a gauge series that look unsampled rather than real.
 
@@ -362,7 +385,8 @@ def coverage_hints(results: List[Dict[str, Any]], cluster_id: str, metric_querie
     total = reported = 0
     # Latency / fail-rate are legitimately null without requests (see value_status); judge sampling
     # on the other series when there are any.
-    base = [r for r in results if not paired_count_metric(r.get("name", ""))] or results
+    base = [r for r in results if not paired_count_metric(r.get("name", ""))
+            and r.get("name") not in ALWAYS_REPORTED] or results
     for r in base:
         zeros = suspect_zero_buckets(r, granularity)
         for p in r.get("values") or []:
