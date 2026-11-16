@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 # The usage API returns the whole range in one response (~85 KB per day for an
 # org with ~200 clusters), so cap how much we pull through the server and into the agent.
 MAX_SUMMARY_DAYS = 366
-MAX_RAW_DAYS = 7
+MAX_RAW_DAYS = 31
 # Org-wide usage is large (measured ~85 KB of JSON per day for an org with ~200 clusters),
 # so cap what reaches the model.
 DEFAULT_GROUP_LIMIT = 20
@@ -152,9 +152,11 @@ async def get_usage_summary(
         cluster_id: Only include usage for this cluster (optional)
         project_id: Only include usage for this project (optional)
         limit: Maximum number of groups to return (default 20, max 200). Smaller groups are
-               rolled up into one "other" entry so the total still adds up.
+               rolled up into one "other" entry so the total still adds up. Ignored for
+               group_by="day", which always returns every day in date order.
     Returns:
-        Dict with the total and groups sorted by amount (highest first). Amounts are decimal
+        Dict with the total and groups sorted by amount (highest first; by date for
+        group_by="day"). Amounts are decimal
         values in whole units of the returned currency (e.g. 12.34 = 12.34 USD, not cents),
         rounded to 2 decimal places after summing. Usage not tied to a cluster/project/region
         (e.g. org-level charges) is grouped as "unattributed". group_count is the number of
@@ -210,8 +212,12 @@ async def get_usage_summary(
         if len(currencies) > 1:
             raise ValueError(f"usage spans multiple currencies: {', '.join(sorted(currencies))}")
 
-        ranked = sorted(group_amounts.items(), key=lambda kv: kv[1], reverse=True)
-        kept, rest = ranked[:limit], ranked[limit:]
+        if group_by == 'day':
+            ranked = sorted(group_amounts.items())
+            kept, rest = ranked, []
+        else:
+            ranked = sorted(group_amounts.items(), key=lambda kv: kv[1], reverse=True)
+            kept, rest = ranked[:limit], ranked[limit:]
 
         def share(amount: Decimal) -> float:
             return float((amount / total * 100).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)) if total else 0.0
@@ -286,7 +292,7 @@ async def query_daily_usage(
 
     Args:
         start: First day of the range in YYYY-MM-DD format (UTC)
-        end: Last day of the range in YYYY-MM-DD format (UTC, inclusive). Maximum range is 7 days; use cluster_id or project_id to keep results small.
+        end: Last day of the range in YYYY-MM-DD format (UTC, inclusive). Maximum range is 31 days.
         cluster_id: Only include line items for this cluster (optional)
         project_id: Only include line items for this project (optional)
     Returns:
