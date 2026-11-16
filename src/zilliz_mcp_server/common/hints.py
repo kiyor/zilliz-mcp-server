@@ -31,6 +31,7 @@ Keys whose value is unknown are omitted. MCP clients receive it as a text
 content block with ``isError: true``.
 """
 
+import asyncio
 import json
 import re
 from typing import Any, Dict, List, Optional
@@ -335,6 +336,13 @@ def classify_error(tool: str, exc: Exception, ctx: Optional[Dict[str, Any]] = No
         )
 
     # --- transport ------------------------------------------------------------
+    if isinstance(exc, (requests.exceptions.Timeout, TimeoutError, asyncio.TimeoutError)):
+        return build(
+            "NETWORK_ERROR",
+            fix="The request timed out before the API answered. Retry once; if it times out again, narrow the "
+                "request (shorter time window, fewer days or fewer items).",
+            next_steps=[step(tool, "Retry the same call; narrow the window if it times out again.", **_clean(ctx))],
+        )
     if isinstance(exc, requests.exceptions.ConnectionError):
         return build(
             "NETWORK_ERROR",

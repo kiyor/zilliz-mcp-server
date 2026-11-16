@@ -89,6 +89,23 @@ class TestTool:
         assert out["data"]["failed_chunks"] == 1
         assert any("could not be read" in n and "upstream 500" in n for n in out["notes"])
 
+    @patch("zilliz_mcp_server.tools.zilliz.activity.openapi_client")
+    async def test_all_chunks_timeout_is_network_error(self, client, monkeypatch):
+        import time
+        monkeypatch.setattr(a, "TOTAL_TIMEOUT_S", 0.05)
+        def req(uri, body_map=None, method="GET"):
+            if method == "GET":
+                return {"data": {}}
+            time.sleep(0.3)
+            return {"data": {"results": []}}
+        client.control_plane_api_request.side_effect = req
+        with pytest.raises(Exception) as ei:
+            await a.get_cluster_activity_history("c1", days=7)
+        payload = json.loads(str(ei.value))
+        assert payload["error"] == "NETWORK_ERROR"
+        assert "timed out" in payload["fix"]
+        assert payload["next_steps"][0]["tool"] == "get_cluster_activity_history"
+
     @pytest.mark.parametrize("days", [0, 181, "7"])
     async def test_bad_days(self, days):
         with pytest.raises(Exception) as ei:
