@@ -15,6 +15,7 @@ from zilliz_mcp_server.app import zilliz_mcp
 from zilliz_mcp_server.common import hints, openapi_client
 from zilliz_mcp_server.tools.zilliz.billing_tools import (
     MAX_SUMMARY_DAYS, MAX_RAW_DAYS, UNATTRIBUTED, _decimal, _fetch_usage, _money, _parse_range,
+    usage_tool_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -326,4 +327,4 @@ async def compare_billing_periods(
 
     except Exception as e:
         logger.error(f"COMPARE_BILLING_PERIODS ERROR: {str(e)}")
-        raise hints.tool_error("compare_billing_periods", e, ctx) from e
+        raise usage_tool_error("compare_billing_periods", e, ctx) from e
