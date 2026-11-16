@@ -7,7 +7,7 @@ Every tool returns a JSON text payload (MCP text content) with this shape::
       "next_steps": [                      # optional, only when informative
         {"tool": "search", "args": {...}, "why": "..."}
       ],
-      "notes": ["..."]                     # optional, short caveats
+      "data": <the tool's actual result>
     }
 
 ``next_steps`` entries are directly executable: ``tool`` is a tool name exposed by
