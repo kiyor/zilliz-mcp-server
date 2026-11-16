@@ -39,9 +39,9 @@ class TestCoverageHints:
     def test_all_null_coarse_suggests_readable_recent_windows(self):
         steps, notes = m.coverage_hints(res([None] * 180), CID, MQ, "P1D", "P180D", None, None)
         assert "does NOT mean no traffic" in notes[0] and "0/180" in notes[0]
-        assert steps[0]["args"] == {"cluster_id": CID, "period": "PT4H", "granularity": "PT30S",
+        assert steps[0]["args"] == {"cluster_id": CID, "period": "PT3H", "granularity": "PT30S",
                                     "metric_queries": MQ}
-        assert (steps[1]["args"]["period"], steps[1]["args"]["granularity"]) == ("PT16H", "PT2M")
+        assert (steps[1]["args"]["period"], steps[1]["args"]["granularity"]) == ("PT15H", "PT2M")
 
     @pytest.mark.parametrize("n_metrics", [1, 2, 4, 6])
     def test_suggestions_stay_readable(self, n_metrics):
@@ -54,14 +54,14 @@ class TestCoverageHints:
 
     def test_one_day_at_pt1h(self):
         steps, _ = m.coverage_hints(res([None] * 24), CID, MQ, "PT1H", "P1D", None, None)
-        assert [(s["args"]["period"], s["args"]["granularity"]) for s in steps] == [("PT4H", "PT30S"),
-                                                                                   ("PT16H", "PT2M")]
+        assert [(s["args"]["period"], s["args"]["granularity"]) for s in steps] == [("PT3H", "PT30S"),
+                                                                                   ("PT15H", "PT2M")]
 
     def test_start_end_window_keeps_its_last_part(self):
         s, e = "2026-11-01T00:00:00Z", "2026-11-08T00:00:00Z"
         steps, _ = m.coverage_hints(res([None] * 168), CID, MQ, "PT1H", None, s, e)
         a = steps[0]["args"]
-        assert a["start"] == "2026-11-07T20:00:00Z" and a["end"] == e and "period" not in a
+        assert a["start"] == "2026-11-07T21:00:00Z" and a["end"] == e and "period" not in a
 
     def test_series_summary(self):
         r = res([None, "2", None, "5.5", None])
