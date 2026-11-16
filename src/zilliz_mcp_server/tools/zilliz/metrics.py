@@ -294,7 +294,28 @@ def _readable_period(granularity: str, n_series: int, cap_s: int) -> Optional[st
     return _iso(secs) if secs > 0 else None
 
 
-def series_summary(results: List[Dict[str, Any]]) -> Optional[str]:
+GAUGE_PREFIXES = ("CU_", "STORAGE_", "CLUSTER_WRITE_CAPACITY", "ENTITIES_")
+
+
+def suspect_zero_buckets(r: Dict[str, Any], granularity: Optional[str]) -> int:
+    """Zero-valued buckets of a gauge series that look unsampled rather than real.
+
+    Observed at coarse granularity: CU_CAPACITY at P7D/PT1H returned "0" in 167 of 168 buckets
+    and 13.11 in the last, while PT1M showed ~14.5% throughout. A gauge (CU, storage, entities)
+    that is mostly 0 with some non-zero values at a granularity coarser than PT2M is treated as
+    under-sampled.
+    """
+    g_s = duration_seconds(granularity)
+    if not g_s or g_s <= 120 or not str(r.get("name", "")).startswith(GAUGE_PREFIXES):
+        return 0
+    nums = [_num(p.get("value")) for p in r.get("values") or [] if p.get("value") is not None]
+    zeros = sum(1 for v in nums if v == 0)
+    if zeros and zeros < len(nums) and zeros * 2 >= len(nums):
+        return zeros
+    return 0
+
+
+def series_summary(results: List[Dict[str, Any]], granularity: Optional[str] = None) -> Optional[str]:
     """One-line per-series summary (buckets with a value, first/last such timestamp, max).
 
     Goes into notes, which are emitted before data, so it survives client-side truncation of
@@ -312,6 +333,11 @@ def series_summary(results: List[Dict[str, Any]]) -> Optional[str]:
             s += f", first {got[0][0]}, last {got[-1][0]}"
             if nums:
                 s += f", max {max(nums):g}"
+        zeros = suspect_zero_buckets(r, granularity)
+        if zeros:
+            any_null = True
+            s += (f" ({zeros} of them report 0 next to non-zero values; at {granularity} such zeros "
+                  f"are likely unsampled, NOT 0%; check at PT30S/PT1M)")
         parts.append(s)
     if not parts or not any_null:
         return None
@@ -338,9 +364,11 @@ def coverage_hints(results: List[Dict[str, Any]], cluster_id: str, metric_querie
     # on the other series when there are any.
     base = [r for r in results if not paired_count_metric(r.get("name", ""))] or results
     for r in base:
+        zeros = suspect_zero_buckets(r, granularity)
         for p in r.get("values") or []:
             total += 1
             reported += p.get("value") is not None
+        reported -= zeros
     if total == 0 or reported / total >= LOW_COVERAGE:
         return [], []
     steps: List[Dict[str, Any]] = []

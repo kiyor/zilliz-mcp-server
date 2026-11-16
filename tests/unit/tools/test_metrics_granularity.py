@@ -39,9 +39,9 @@ class TestCoverageHints:
     def test_all_null_coarse_suggests_readable_recent_windows(self):
         steps, notes = m.coverage_hints(res([None] * 180), CID, MQ, "P1D", "P180D", None, None)
         assert "does NOT mean no traffic" in notes[0] and "0/180" in notes[0]
-        assert steps[0]["args"] == {"cluster_id": CID, "period": "PT4H", "granularity": "PT30S",
+        assert steps[0]["args"] == {"cluster_id": CID, "period": "PT3H", "granularity": "PT30S",
                                     "metric_queries": MQ}
-        assert (steps[1]["args"]["period"], steps[1]["args"]["granularity"]) == ("PT16H", "PT2M")
+        assert (steps[1]["args"]["period"], steps[1]["args"]["granularity"]) == ("PT15H", "PT2M")
 
     @pytest.mark.parametrize("n_metrics", [1, 2, 4, 6])
     def test_suggestions_stay_readable(self, n_metrics):
@@ -54,14 +54,14 @@ class TestCoverageHints:
 
     def test_one_day_at_pt1h(self):
         steps, _ = m.coverage_hints(res([None] * 24), CID, MQ, "PT1H", "P1D", None, None)
-        assert [(s["args"]["period"], s["args"]["granularity"]) for s in steps] == [("PT4H", "PT30S"),
-                                                                                   ("PT16H", "PT2M")]
+        assert [(s["args"]["period"], s["args"]["granularity"]) for s in steps] == [("PT3H", "PT30S"),
+                                                                                   ("PT15H", "PT2M")]
 
     def test_start_end_window_keeps_its_last_part(self):
         s, e = "2026-11-01T00:00:00Z", "2026-11-08T00:00:00Z"
         steps, _ = m.coverage_hints(res([None] * 168), CID, MQ, "PT1H", None, s, e)
         a = steps[0]["args"]
-        assert a["start"] == "2026-11-07T20:00:00Z" and a["end"] == e and "period" not in a
+        assert a["start"] == "2026-11-07T21:00:00Z" and a["end"] == e and "period" not in a
 
     def test_series_summary(self):
         r = res([None, "2", None, "5.5", None])
@@ -73,7 +73,23 @@ class TestCoverageHints:
         assert m.series_summary(res(["1", "2"])) is None
         assert "0/3 buckets" in m.series_summary(res([None] * 3))
 
-    def test_unexplained_null_note_does_not_contradict_sparse_note(self):
+    def test_gauge_zeros_next_to_values_are_suspect_at_coarse_granularity(self):
+        cu = [{"name": "CU_CAPACITY", "values": [{"timestamp": f"t{i}", "value": "0"} for i in range(167)]
+               + [{"timestamp": "t167", "value": "13.11"}]}]
+        assert m.suspect_zero_buckets(cu[0], "PT1H") == 167
+        assert m.suspect_zero_buckets(cu[0], "PT1M") == 0
+        s = m.series_summary(cu, "PT1H")
+        assert "167 of them report 0" in s and "NOT 0%" in s
+        steps, notes = m.coverage_hints(cu, CID, [{"metricName": "CU_CAPACITY"}], "PT1H", "P7D", None, None)
+        assert steps and "1/168" in notes[0]
+        # a real all-zero gauge, or a count metric with zeros, is left alone
+        flat = [{"name": "CU_CAPACITY", "values": [{"timestamp": "t", "value": "0"}] * 24}]
+        assert m.suspect_zero_buckets(flat[0], "PT1H") == 0
+        cnt = [{"name": "REQ_SEARCH_COUNT", "values": [{"timestamp": "t", "value": "0"}] * 20
+                + [{"timestamp": "t", "value": "3"}]}]
+        assert m.suspect_zero_buckets(cnt[0], "PT1H") == 0
+
+    def test_unexplained_null_note_is_consistent(self):
         results = res([None] * 168)
         m.annotate(results, {})
         _, notes = m.coverage_hints(results, CID, MQ, "PT1H", "P7D", None, None)

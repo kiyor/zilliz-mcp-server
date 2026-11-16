@@ -430,9 +430,9 @@ async def query_cluster_metrics(
         granularity: Bucket size in ISO 8601, minimum PT30S (e.g. PT30S, PT1M, PT5M, PT1H, P1D).
             Choose it with care: at coarse granularities (PT1H, P1D) windows that have values at
             PT30S are often reported as null, so short or bursty traffic can look like none.
-            Keep results small enough to read: about 500 points over all requested series
-            (window / granularity x number of metrics), e.g. PT30S for up to 4 hours of one
-            metric, PT2M for about 16 hours. The API itself rejects requests with roughly 40,000
+            Keep results small enough to read: about 450 points over all requested series
+            (window / granularity x number of metrics), e.g. PT30S for up to 3 hours of one
+            metric, PT2M for about 15 hours. The API itself rejects requests with roughly 40,000
             buckets (unknown error), but results that large are too long for clients to read.
             For long-range questions, query the long window for the overall shape, then confirm
             activity with a short recent window at PT30S; the result's notes summarise each series
@@ -558,7 +558,7 @@ async def query_cluster_metrics(
         steps, notes = ns.query_cluster_metrics(data, cluster_id)
         cov_steps, cov_notes = metrics_catalog.coverage_hints(
             results, cluster_id, metric_queries, granularity, period, start, end)
-        summary = metrics_catalog.series_summary(results)
+        summary = metrics_catalog.series_summary(results, granularity)
         return hints.ok(data, cov_steps + steps, ([summary] if summary else []) + cov_notes + notes)
 
     except Exception as e:
