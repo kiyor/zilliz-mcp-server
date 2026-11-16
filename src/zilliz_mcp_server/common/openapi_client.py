@@ -13,6 +13,11 @@ _ALLOWED_DATA_PLANE_HOST_SUFFIXES = (
     ".zilliz.com.cn",
 )
 
+# (connect, read) timeout in seconds for every HTTP call, so a slow or stalled
+# API response cannot hang the MCP tool call indefinitely. Large usage queries
+# can take a while to return, hence the generous read timeout.
+REQUEST_TIMEOUT = (10, 120)
+
 
 def _get_headers() -> Dict[str, str]:
     """Generate request headers"""
@@ -144,7 +149,7 @@ def _resolve_cluster_endpoint(cluster_id: str, region_id: str) -> str:
 def get(url: str, params_map: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """GET request interface"""
     headers = _get_headers()
-    response = requests.get(url, params=params_map, headers=headers)
+    response = requests.get(url, params=params_map, headers=headers, timeout=REQUEST_TIMEOUT)
     _raise_for_status(response)
     return _parse_response(response)
 
@@ -152,7 +157,7 @@ def get(url: str, params_map: Optional[Dict[str, Any]] = None) -> Dict[str, Any]
 def post(url: str, params_map: Optional[Dict[str, Any]] = None, body_map: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """POST request interface"""
     headers = _get_headers()
-    response = requests.post(url, params=params_map, json=body_map, headers=headers)
+    response = requests.post(url, params=params_map, json=body_map, headers=headers, timeout=REQUEST_TIMEOUT)
     _raise_for_status(response)
     return _parse_response(response)
 
@@ -160,7 +165,7 @@ def post(url: str, params_map: Optional[Dict[str, Any]] = None, body_map: Option
 def delete(url: str, params_map: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """DELETE request interface"""
     headers = _get_headers()
-    response = requests.delete(url, params=params_map, headers=headers)
+    response = requests.delete(url, params=params_map, headers=headers, timeout=REQUEST_TIMEOUT)
     _raise_for_status(response)
     return _parse_response(response)
 
