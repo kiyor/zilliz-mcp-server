@@ -226,7 +226,7 @@ async def describe_collection(
         rowCount is omitted (with a note) if the stats call fails.
         rowCount is approximate: right after inserts or deletes it can still include rows that
         were deleted or not yet flushed. For an exact count, use query with
-        output_fields=["count(*)"].
+        filter="" and output_fields=["count(*)"].
         Example (full envelope, hints omitted):
         {
             "data": {
@@ -320,7 +320,8 @@ async def describe_collection(
         except Exception as stats_err:
             logger.warning(f"DESCRIBE_COLLECTION get_stats failed: {stats_err}")
             stats_note = ("rowCount unavailable (collections/get_stats failed: "
-                          f"{str(stats_err)[:120]}); use query with output_fields=['count(*)'] instead.")
+                          f"{str(stats_err)[:120]}); use query with filter=\"\" and "
+                          "output_fields=[\"count(*)\"] instead.")
 
         steps, notes = ns.describe_collection(data, cluster_id, region_id, db_name)
         if stats_note:
