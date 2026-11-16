@@ -116,6 +116,14 @@ class TestUsageSize:
         assert set(s["groups"][0]["by_cost_type"]) == {"backup", "storage", "compute"}
         assert abs(sum(g["amount"] for g in s["groups"]) - s["total"]) < 0.05
 
+    def test_summary_by_month_notes_partial_edge_months(self, mock_client):
+        mock_client.control_plane_api_request.return_value = _usage(days=120, per_day=30)
+        env = json.loads(_call("get_usage_summary", start="2026-10-01", end="2027-01-28", group_by="month"))
+        assert len(env["notes"]) == 1 and "Partial month(s) 2027-01:" in env["notes"][0]
+        mock_client.control_plane_api_request.return_value = _usage(days=92, per_day=30)
+        env = json.loads(_call("get_usage_summary", start="2026-10-01", end="2026-12-31", group_by="month"))
+        assert "notes" not in env
+
     def test_daily_without_filter_covers_a_month(self, mock_client):
         mock_client.control_plane_api_request.return_value = _usage(days=31)
         out = _call("query_daily_usage", start="2026-10-01", end="2026-10-31")
