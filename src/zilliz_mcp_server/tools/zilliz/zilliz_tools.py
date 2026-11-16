@@ -393,7 +393,10 @@ async def query_cluster_metrics(
               Data: ENTITIES_COUNT, ENTITIES_LOADED, ENTITIES_INDEXED, COLLECTIONS_COUNT,
                 UNLOADED_COLLECTIONS_COUNT, FLUSH_COUNT (per minute)
     Returns:
-        JSON {"data": {"results": [...]}, "notes": [...]}. Values are strings. Every point also
+        JSON {"notes": [...], "next_steps": [{"tool", "args", "why"}], "data": <result>};
+        next_steps/notes are present only when useful. On failure the error text is JSON
+        {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
+        <result> is {"results": [...]}. Values are strings. Every point also
         carries 'value_status':
           - "reported": a real value (may be "0", meaning zero).
           - "unknown_or_no_failures": fail-rate is null but requests were served in that bucket.
