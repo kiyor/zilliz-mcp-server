@@ -3,6 +3,7 @@
 import json
 import logging
 from typing import Dict, Any, List, Optional, Union
+from pydantic import StrictBool
 from zilliz_mcp_server.common import openapi_client
 from zilliz_mcp_server.common import hints
 from zilliz_mcp_server.common import next_steps as ns
@@ -273,7 +274,7 @@ async def describe_cluster(cluster_id: str) -> str:
         raise hints.tool_error("describe_cluster", e, {"cluster_id": cluster_id}) from e
 
 @write_tool(destructive=True, idempotent=True)
-async def suspend_cluster(cluster_id: str, confirm: bool = False) -> str:
+async def suspend_cluster(cluster_id: str, confirm: StrictBool = False) -> str:
     """
     Suspend a dedicated cluster in Zilliz Cloud. DESTRUCTIVE TO AVAILABILITY: once
     suspended, the cluster rejects all reads and writes until resume_cluster is called,
@@ -309,22 +310,34 @@ async def suspend_cluster(cluster_id: str, confirm: bool = False) -> str:
 
         if confirm is not True:
             data = openapi_client.control_plane_api_request(f"/v2/clusters/{cluster_id}", method="GET").get('data', {})
+            status = data.get('status', 'Unknown')
+            if status in ('SUSPENDED', 'SUSPENDING'):
+                return hints.ok({
+                    'confirm_required': False,
+                    'action': 'suspend_cluster',
+                    'cluster': {'cluster_id': data.get('clusterId', cluster_id),
+                                'cluster_name': data.get('clusterName', 'Unknown'), 'status': status},
+                    'message': f"The cluster is already {status}; nothing to suspend and no confirmation needed.",
+                }, [hints.step("describe_cluster", "check the cluster status", cluster_id=cluster_id)],
+                    ["Nothing was changed."])
             preview = {
                 'confirm_required': True,
                 'action': 'suspend_cluster',
                 'cluster': {
                     'cluster_id': data.get('clusterId', cluster_id),
                     'cluster_name': data.get('clusterName', 'Unknown'),
-                    'status': data.get('status', 'Unknown'),
+                    'status': status,
                     'plan': data.get('plan', 'Unknown'),
                     'cu_size': data.get('cuSize', 0),
                     'region_id': data.get('regionId', 'Unknown'),
                 },
                 'impact': SUSPEND_IMPACT,
             }
-            return hints.ok(preview, [hints.step(
-                "suspend_cluster", "only after the user confirms they want this cluster suspended",
-                cluster_id=cluster_id, confirm=True)], ["Nothing was changed. Ask the user to confirm before re-calling with confirm=true."])
+            # Deliberately no next_steps: an executable suggestion with confirm=true would let
+            # an agent skip the user's confirmation.
+            preview['how_to_confirm'] = ("Show this to the user. Only if they explicitly agree, call "
+                                         "suspend_cluster again with the same cluster_id and confirm=true.")
+            return hints.ok(preview, None, ["Nothing was changed."])
 
         # Build URI with cluster_id as path parameter
         uri = f"/v2/clusters/{cluster_id}/suspend"

@@ -2,6 +2,7 @@
 import json
 import logging
 from typing import Dict, Any, List, Optional, Union
+from pydantic import StrictBool
 from zilliz_mcp_server.common import openapi_client
 from zilliz_mcp_server.common import hints
 from zilliz_mcp_server.common import next_steps as ns
@@ -407,11 +408,11 @@ def _delete_preview(cluster_id: str, region_id: str, collection_name: str, filte
         preview['partition_name'] = partition_name
     if count_error:
         preview['count_error'] = count_error
-    args = {"cluster_id": cluster_id, "region_id": region_id, "collection_name": collection_name,
-            "filter": filter, "db_name": db_name, "partition_name": partition_name, "confirm": True}
-    args = {k: v for k, v in args.items() if v != ""}
-    return hints.ok(preview, [hints.step("delete_entities", "only after the user confirms this deletion", **args)],
-                    ["Nothing was deleted. Ask the user to confirm before re-calling with confirm=true."])
+    # Deliberately no next_steps: an executable suggestion with confirm=true would let an agent
+    # skip the user's confirmation.
+    preview['how_to_confirm'] = ("Show this to the user. Only if they explicitly agree, call "
+                                 "delete_entities again with the same arguments and confirm=true.")
+    return hints.ok(preview, None, ["Nothing was deleted."])
 
 
 @write_tool(destructive=True, idempotent=True)
@@ -422,7 +423,7 @@ async def delete_entities(
     filter: str,
     db_name: str = "",
     partition_name: str = "",
-    confirm: bool = False
+    confirm: StrictBool = False
 ) -> str:
     """
     Delete entities from a collection by filtering conditions or primary keys. IRREVERSIBLE:
