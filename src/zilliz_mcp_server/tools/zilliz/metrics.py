@@ -4,6 +4,7 @@ The catalog only lists metric names that the Query Cluster Metrics API
 (POST /v2/clusters/{CLUSTER_ID}/metrics/query) actually accepts.
 """
 
+import json
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -158,7 +159,7 @@ def _num(v: Any) -> Optional[float]:
 
 
 NULL_NOTE = ("value=null means the API reported no data point for that time bucket. It is NOT "
-             "the same as 0. See each point's 'value_status'.")
+             "the same as 0. Null buckets are listed in 'null_runs' with their status.")
 NULL_NOTE_UNEXPLAINED = (
     "value=null means no data point was reported for that bucket. It is not 0, and on its own it "
     "does not show that the operation was unused or the cluster idle: with granularity coarser "
@@ -212,6 +213,91 @@ def annotate(results: List[Dict[str, Any]], counts: Dict[str, Dict[str, Optional
                     "was not used then, or coarse buckets hid it; confirm at PT30S).")
             else:
                 res["null_note"] = NULL_NOTE_UNEXPLAINED
+
+
+def compact(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Output form of annotated results: 'values' keeps only points that have a value, and null
+    buckets become 'null_runs' ({status, from, to, points} per run of consecutive nulls with the
+    same status). Per-point status labels were about a third of the result and most of a sparse
+    series; runs keep the null-is-not-0 information in a few entries. 'buckets' is the number of
+    buckets in the series, so values + null_runs account for all of them.
+    """
+    out = []
+    for res in results:
+        values = res.get("values") or []
+        kept, runs, cur = [], [], None
+        for p in values:
+            if p.get("value") is not None:
+                kept.append({k: v for k, v in p.items() if k != "value_status"})
+                cur = None
+                continue
+            status = p.get("value_status", "no_data")
+            if cur is not None and cur["status"] == status:
+                cur["to"] = p.get("timestamp")
+                cur["points"] += 1
+            else:
+                cur = {"status": status, "from": p.get("timestamp"), "to": p.get("timestamp"), "points": 1}
+                runs.append(cur)
+        r = {k: v for k, v in res.items() if k not in ("values", "null_points", "null_note")}
+        r["buckets"] = len(values)
+        r["values"] = kept
+        if runs:
+            r["null_points"] = sum(x["points"] for x in runs)
+            r["null_runs"] = runs
+            if res.get("null_note"):
+                r["null_note"] = res["null_note"]
+        out.append(r)
+    return out
+
+
+def fit_results(results: List[Dict[str, Any]], budget: int = RESULT_BUDGET):
+    """(compacted results within budget bytes of JSON, trim info or None).
+
+    When the compacted result is still too large, every series keeps its most recent N buckets
+    (the same N for all, so timestamps stay aligned) with N as large as fits. Most recent rather
+    than downsampled: downsampling drops or merges buckets, which is the coarse-granularity
+    problem again (hidden spikes, gaps read as zero), while a recent tail is exact and the older
+    part is one start/end re-query.
+    """
+    full = compact(results)
+    if len(json.dumps({"results": full})) <= budget:
+        return full, None
+    longest = max((len(r.get("values") or []) for r in results), default=0)
+
+    def tail(n):
+        return compact([{**r, "values": (r.get("values") or [])[-n:]} for r in results])
+
+    lo, hi, best = 1, max(1, longest - 1), tail(1)
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        cand = tail(mid)
+        if len(json.dumps({"results": cand})) <= budget:
+            best, lo = cand, mid + 1
+        else:
+            hi = mid - 1
+    kept_n = max(r["buckets"] for r in best) if best else 0
+    firsts = [(r.get("values") or [])[0].get("timestamp") for r in results if r.get("values")]
+    kept_firsts = [(r.get("values") or [])[-kept_n].get("timestamp") for r in results
+                   if len(r.get("values") or []) >= kept_n > 0]
+    return best, {"kept": kept_n, "total": longest, "bytes_total": len(json.dumps({"results": full})),
+                  "window_start": min(firsts) if firsts else None,
+                  "kept_from": min(kept_firsts) if kept_firsts else None}
+
+
+def trim_hints(info: Dict[str, Any], cluster_id: str, metric_queries: List[Dict[str, str]],
+               granularity: str):
+    """(step, note) telling the model what fit_results cut and how to get the rest."""
+    note = (f"Values trimmed to fit the response size budget: each series shows its most recent "
+            f"{info['kept']} of {info['total']} buckets (from {info['kept_from']}); the full result was "
+            f"{info['bytes_total']:,} bytes of JSON and clients truncate long tool output. The per-series "
+            f"summary covers the whole window. For older buckets re-query the earlier part (see next_steps) "
+            f"or query fewer series.")
+    st = None
+    if info.get("window_start") and info.get("kept_from"):
+        st = step("query_cluster_metrics", "Older buckets that were trimmed from this result.",
+                  cluster_id=cluster_id, metric_queries=metric_queries, granularity=granularity,
+                  start=info["window_start"], end=info["kept_from"])
+    return st, note
 
 
 def needed_count_metrics(results: List[Dict[str, Any]], already: Dict[str, Any]) -> List[str]:
