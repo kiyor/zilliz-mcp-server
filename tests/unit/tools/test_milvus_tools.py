@@ -235,7 +235,10 @@ class TestDescribeCollection:
         """Test successful collection description."""
         from zilliz_mcp_server.tools.milvus.milvus_tools import describe_collection
         
-        mock_client.data_plane_api_request.return_value = sample_collection_response
+        mock_client.data_plane_api_request.side_effect = [
+            sample_collection_response,
+            {"code": 0, "data": {"rowCount": 20000}},
+        ]
         
         result = await describe_collection(
             cluster_id="cluster1",
@@ -244,16 +247,29 @@ class TestDescribeCollection:
         )
         
         result_data = json.loads(result)["data"]
-        assert result_data == sample_collection_response["data"]
+        assert result_data == {**sample_collection_response["data"], "rowCount": 20000}
         
         expected_body = {"collectionName": "test_collection"}
-        mock_client.data_plane_api_request.assert_called_once_with(
-            uri="/v2/vectordb/collections/describe",
-            cluster_id="cluster1",
-            region_id="region1",
-            body_map=expected_body,
-            method="POST"
-        )
+        calls = mock_client.data_plane_api_request.call_args_list
+        assert len(calls) == 2
+        assert calls[0].kwargs == dict(uri="/v2/vectordb/collections/describe", cluster_id="cluster1",
+                                       region_id="region1", body_map=expected_body, method="POST")
+        assert calls[1].kwargs == dict(uri="/v2/vectordb/collections/get_stats", cluster_id="cluster1",
+                                       region_id="region1", body_map=expected_body, method="POST")
+
+    @patch('zilliz_mcp_server.tools.milvus.milvus_tools.openapi_client')
+    async def test_describe_collection_stats_failure_keeps_schema(self, mock_client, sample_collection_response):
+        """get_stats failing must not fail describe; rowCount is omitted and a note explains the fallback."""
+        from zilliz_mcp_server.tools.milvus.milvus_tools import describe_collection
+
+        mock_client.data_plane_api_request.side_effect = [sample_collection_response, Exception("boom")]
+        result = json.loads(await describe_collection(
+            cluster_id="cluster1", region_id="region1", collection_name="test_collection", db_name="db1"))
+        assert "rowCount" not in result["data"]
+        assert result["data"]["collectionName"] == sample_collection_response["data"]["collectionName"]
+        assert any("rowCount unavailable" in n and "count(*)" in n for n in result["notes"])
+        assert mock_client.data_plane_api_request.call_args_list[1].kwargs["body_map"] == {
+            "collectionName": "test_collection", "dbName": "db1"}
 
 
 class TestInsertEntities:
