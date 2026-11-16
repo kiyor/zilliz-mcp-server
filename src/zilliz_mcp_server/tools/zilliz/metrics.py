@@ -23,6 +23,10 @@ METRICS: Dict[str, str] = {
     "CLUSTER_WRITE_CAPACITY": "Write capacity usage (percent)",
     "READ_VCU": "Read vCU consumption (Serverless clusters only)",
     "WRITE_VCU": "Write vCU consumption (Serverless clusters only)",
+    # Accepted by the metrics endpoint and observed to return values, but not in the published
+    # metric list. A change in CU_SIZE marks a scaling step (manual or autoscaling).
+    "CU_SIZE": "Cluster size in CUs (observed; not in the published metric list)",
+    "REPLICA_COUNT": "Number of replicas (observed; not in the published metric list)",
     # Request throughput
     "REQ_INSERT_COUNT": "Insert requests per second (qps)",
     "REQ_BULK_INSERT_COUNT": "Bulk insert requests per second (qps)",
@@ -295,6 +299,22 @@ def _readable_period(granularity: str, n_series: int, cap_s: int) -> Optional[st
 
 
 GAUGE_PREFIXES = ("CU_", "STORAGE_", "CLUSTER_WRITE_CAPACITY", "ENTITIES_")
+
+
+FAIL_RATE_CAVEAT = (
+    "REQ_FAIL_RATE_* does not count requests rejected by rate limiting (Milvus checks rate limits "
+    "before the request handler), so a 0% fail rate does not prove no requests were rate-limited; "
+    "check client-side errors. Each bucket averages its whole interval, so a few seconds of errors "
+    "show as a lower rate spread over several buckets and can peak after the errors stopped; do not "
+    "line it up second by second with client errors, use client logs to time short incidents."
+)
+
+
+def fail_rate_caveat(results: List[Dict[str, Any]]) -> Optional[str]:
+    """One note for any result that contains a REQ_FAIL_RATE_* series."""
+    if any(str(r.get("name", "")).startswith("REQ_FAIL_RATE_") for r in results or []):
+        return FAIL_RATE_CAVEAT
+    return None
 
 
 def suspect_zero_buckets(r: Dict[str, Any], granularity: Optional[str]) -> int:

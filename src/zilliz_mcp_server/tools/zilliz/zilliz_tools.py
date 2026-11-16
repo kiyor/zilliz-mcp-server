@@ -392,6 +392,9 @@ async def query_cluster_metrics(
             metricName must be one of:
               Resource: CU_COMPUTATION, CU_CAPACITY, STORAGE_USE (GB), CLUSTER_WRITE_CAPACITY,
                 READ_VCU, WRITE_VCU (Serverless clusters only; Dedicated clusters reject them)
+                CU_SIZE (cluster size in CUs), REPLICA_COUNT: accepted and observed to return
+                values, but not in the published metric list. A change in CU_SIZE marks a scaling
+                step; check it when failures or latency changed suddenly.
               Throughput (per second): REQ_INSERT_COUNT, REQ_BULK_INSERT_COUNT, REQ_UPSERT_COUNT,
                 REQ_DELETE_COUNT, REQ_SEARCH_COUNT, REQ_QUERY_COUNT, VECTOR_REQ_INSERT_COUNT,
                 VECTOR_REQ_BULK_INSERT_COUNT, VECTOR_REQ_UPSERT_COUNT, VECTOR_REQ_DELETE_COUNT,
@@ -401,6 +404,12 @@ async def query_cluster_metrics(
               Failure rate (percent, per operation): REQ_FAIL_RATE_INSERT, REQ_FAIL_RATE_BULK_INSERT,
                 REQ_FAIL_RATE_UPSERT, REQ_FAIL_RATE_DELETE, REQ_FAIL_RATE_SEARCH, REQ_FAIL_RATE_QUERY.
                 There is no overall success/fail rate metric; success rate = 100 - fail rate.
+                Requests rejected by rate limiting are not counted as failures here (Milvus checks
+                rate limits before the request handler), so 0% does not prove that no request was
+                rate-limited; check client-side errors. Each bucket averages over its whole interval
+                (30 s at best), so a few seconds of errors show as a lower rate spread over several
+                buckets, and the peak can come after the errors stopped; use client logs to time
+                short incidents.
               Data: ENTITIES_COUNT, ENTITIES_LOADED, ENTITIES_INDEXED, COLLECTIONS_COUNT,
                 UNLOADED_COLLECTIONS_COUNT, FLUSH_COUNT (per minute)
     Returns:
@@ -504,7 +513,9 @@ async def query_cluster_metrics(
         cov_steps, cov_notes = metrics_catalog.coverage_hints(
             results, cluster_id, metric_queries, granularity, period, start, end)
         summary = metrics_catalog.series_summary(results, granularity)
-        return hints.ok(data, cov_steps + steps, ([summary] if summary else []) + cov_notes + notes)
+        caveat = metrics_catalog.fail_rate_caveat(results)
+        return hints.ok(data, cov_steps + steps,
+                        ([summary] if summary else []) + ([caveat] if caveat else []) + cov_notes + notes)
 
     except Exception as e:
         logger.error(f"QUERY_CLUSTER_METRICS ERROR: {str(e)}")
