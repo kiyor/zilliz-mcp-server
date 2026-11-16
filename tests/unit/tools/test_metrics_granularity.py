@@ -73,7 +73,23 @@ class TestCoverageHints:
         assert m.series_summary(res(["1", "2"])) is None
         assert "0/3 buckets" in m.series_summary(res([None] * 3))
 
-    def test_unexplained_null_note_does_not_contradict_sparse_note(self):
+    def test_gauge_zeros_next_to_values_are_suspect_at_coarse_granularity(self):
+        cu = [{"name": "CU_CAPACITY", "values": [{"timestamp": f"t{i}", "value": "0"} for i in range(167)]
+               + [{"timestamp": "t167", "value": "13.11"}]}]
+        assert m.suspect_zero_buckets(cu[0], "PT1H") == 167
+        assert m.suspect_zero_buckets(cu[0], "PT1M") == 0
+        s = m.series_summary(cu, "PT1H")
+        assert "167 of them report 0" in s and "NOT 0%" in s
+        steps, notes = m.coverage_hints(cu, CID, [{"metricName": "CU_CAPACITY"}], "PT1H", "P7D", None, None)
+        assert steps and "1/168" in notes[0]
+        # a real all-zero gauge, or a count metric with zeros, is left alone
+        flat = [{"name": "CU_CAPACITY", "values": [{"timestamp": "t", "value": "0"}] * 24}]
+        assert m.suspect_zero_buckets(flat[0], "PT1H") == 0
+        cnt = [{"name": "REQ_SEARCH_COUNT", "values": [{"timestamp": "t", "value": "0"}] * 20
+                + [{"timestamp": "t", "value": "3"}]}]
+        assert m.suspect_zero_buckets(cnt[0], "PT1H") == 0
+
+    def test_unexplained_null_note_is_consistent(self):
         results = res([None] * 168)
         m.annotate(results, {})
         _, notes = m.coverage_hints(results, CID, MQ, "PT1H", "P7D", None, None)
