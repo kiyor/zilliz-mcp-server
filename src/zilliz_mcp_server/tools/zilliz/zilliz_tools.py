@@ -393,11 +393,12 @@ async def query_cluster_metrics(
               Data: ENTITIES_COUNT, ENTITIES_LOADED, ENTITIES_INDEXED, COLLECTIONS_COUNT,
                 UNLOADED_COLLECTIONS_COUNT, FLUSH_COUNT (per minute)
     Returns:
-        JSON with the API response. Values are strings. Every point also carries 'value_status':
+        JSON {"data": {"results": [...]}, "notes": [...]}. Values are strings. Every point also
+        carries 'value_status':
           - "reported": a real value (may be "0", meaning zero).
-          - "no_failures": fail-rate is null but requests were served in that bucket -> no request
-            failed (treat as 0%).
-          - "no_requests": latency / fail-rate is null because no requests of that type were served.
+          - "unknown_or_no_failures": fail-rate is null but requests were served in that bucket.
+            Usually nothing failed, but the metric cannot confirm it; do not report it as 0%.
+          - "no_requests": latency / fail-rate is null and the request count was 0 in that bucket.
           - "no_data": no point reported (e.g. cluster not running yet, or the operation was never
             used); this is NOT zero.
         Results containing nulls also carry 'null_points' and a 'null_note' explaining them. For
@@ -412,7 +413,7 @@ async def query_cluster_metrics(
                         "stat": "AVG",
                         "unit": "percent",
                         "values": [
-                            {"timestamp": "2024-06-30T16:05:00Z", "value": null, "value_status": "no_failures"},
+                            {"timestamp": "2024-06-30T16:05:00Z", "value": null, "value_status": "unknown_or_no_failures"},
                             {"timestamp": "2024-06-30T16:10:00Z", "value": "0.50", "value_status": "reported"}
                         ],
                         "null_points": 1,
@@ -450,7 +451,15 @@ async def query_cluster_metrics(
         try:
             response = openapi_client.control_plane_api_request(uri, body_map=body, method="POST")
         except Exception as api_err:
-            raise Exception(metrics_catalog.explain_api_error(str(api_err), names)) from api_err
+            # Keep the original exception (with .code / .http_status) for classification,
+            # and add metric-specific advice to the structured error when it applies.
+            structured = hints.tool_error("query_cluster_metrics", api_err,
+                                          {"cluster_id": cluster_id, "metric_queries": metric_queries})
+            extra_fix = metrics_catalog.api_error_fix(names)
+            if extra_fix:
+                structured = hints.StructuredToolError(
+                    {**structured.payload, "field": "metric_queries", "fix": extra_fix})
+            raise structured from api_err
 
         data = response.get('data', {})
         results = data.get('results', [])
