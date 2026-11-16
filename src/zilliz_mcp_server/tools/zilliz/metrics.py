@@ -6,6 +6,8 @@ The catalog only lists metric names that the Query Cluster Metrics API
 
 from typing import Any, Dict, List, Optional
 
+from zilliz_mcp_server.common.hints import StructuredToolError
+
 # Request operations that have count / latency / failure-rate series.
 _OPS = ["INSERT", "BULK_INSERT", "UPSERT", "DELETE", "SEARCH", "QUERY"]
 
@@ -72,6 +74,22 @@ REPLACEMENTS: Dict[str, str] = {
 DEFAULT_STAT = "AVG"
 
 
+def _invalid(message: str, expected: str, got: Any, fix: str) -> StructuredToolError:
+    """INVALID_ARGUMENT error for metric_queries. The full list of valid values goes in
+    'expected' so it is never cut by the message length limit."""
+    return StructuredToolError({
+        "error": "INVALID_ARGUMENT",
+        "message": message,
+        "field": "metric_queries",
+        "expected": expected,
+        "got": got,
+        "fix": fix,
+    })
+
+
+VALID_NAMES = "Valid metric names: " + ", ".join(METRICS)
+
+
 def allowed_stats(name: str) -> List[str]:
     """Stats accepted for a metric.
 
@@ -88,31 +106,28 @@ def allowed_stats(name: str) -> List[str]:
 def validate_metric_queries(metric_queries: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """Validate and normalize metric queries. Raises ValueError with valid choices."""
     if not metric_queries:
-        raise ValueError(
-            "metric_queries is empty. Pass at least one item like "
-            '{"metricName": "REQ_SEARCH_COUNT"}. Valid metric names: ' + ", ".join(METRICS))
+        raise _invalid("metric_queries is empty.", VALID_NAMES, metric_queries,
+                       'Pass at least one item like {"metricName": "REQ_SEARCH_COUNT"}.')
     out = []
     for q in metric_queries:
         if not isinstance(q, dict) or "metricName" not in q:
-            raise ValueError(
-                "Each metric query must be an object with 'metricName' (and optional 'stat'), "
-                'e.g. {"metricName": "REQ_SEARCH_LATENCY_P99"}.')
+            raise _invalid("Each metric query must be an object with 'metricName' (and optional 'stat').",
+                           '[{"metricName": "<METRIC_NAME>", "stat": "AVG"}]. ' + VALID_NAMES, q,
+                           'Use e.g. {"metricName": "REQ_SEARCH_LATENCY_P99"}.')
         name = str(q["metricName"]).strip().upper()
         if name not in METRICS:
-            msg = f"Unknown metric name '{q['metricName']}'."
-            if name in REPLACEMENTS:
-                msg += " " + REPLACEMENTS[name]
-            raise ValueError(msg + " Valid metric names: " + ", ".join(METRICS))
+            fix = REPLACEMENTS.get(name, "Pick a name from 'expected'.")
+            raise _invalid(f"Unknown metric name '{q['metricName']}'.", VALID_NAMES, q["metricName"], fix)
         stat = str(q.get("stat") or DEFAULT_STAT).strip().upper()
         valid = allowed_stats(name)
         if stat not in valid:
-            hint = ""
+            fix = "Omit stat or use AVG."
             if "_LATENCY_" in name or stat in ("P99", "P90"):
-                hint = (" For latency percentiles pick the metric by name instead, e.g. "
+                fix += (" For latency percentiles pick the metric by name instead, e.g. "
                         "REQ_SEARCH_LATENCY_P99 or REQ_SEARCH_LATENCY_AVG.")
-            raise ValueError(
-                f"stat '{q.get('stat')}' is not valid for {name}. Valid stat values for {name}: "
-                f"{', '.join(valid)} (or omit stat).{hint}")
+            raise _invalid(f"stat '{q.get('stat')}' is not valid for {name}.",
+                           f"Valid stat values for {name}: {', '.join(valid)} (or omit stat)",
+                           q.get("stat"), fix)
         out.append({"name": name, "stat": stat})
     return out
 
@@ -151,9 +166,9 @@ def annotate(results: List[Dict[str, Any]], counts: Dict[str, Dict[str, Optional
     counts: metric name -> {timestamp: numeric value or None} for paired request-count metrics.
     value_status values:
       - "reported": the API returned a value (it may legitimately be "0").
-      - "no_failures": fail-rate is null while requests were served in that bucket
-        -> zero failed requests (fail rate is effectively 0%).
-      - "no_requests": latency / fail-rate is null because no requests of that type were served.
+      - "unknown_or_no_failures": fail-rate is null while requests were served in that bucket.
+        Usually this means nothing failed, but the fail-rate series alone cannot prove it.
+      - "no_requests": latency / fail-rate is null and the paired request count is 0.
       - "no_data": no data point reported; cause cannot be determined from this metric alone.
     """
     for res in results:
@@ -170,18 +185,22 @@ def annotate(results: List[Dict[str, Any]], counts: Dict[str, Dict[str, Optional
             status = "no_data"
             if pair_series is not None and point.get("timestamp") in pair_series:
                 c = pair_series[point["timestamp"]]
-                if c is None or c == 0:
+                if c == 0:
                     status = "no_requests"
-                elif name.startswith("REQ_FAIL_RATE_"):
-                    status = "no_failures"
+                elif c is not None and name.startswith("REQ_FAIL_RATE_"):
+                    status = "unknown_or_no_failures"
             point["value_status"] = status
         if nulls:
             res["null_points"] = nulls
             if pair_series is not None:
                 res["null_note"] = (
                     NULL_NOTE + f" Statuses were derived from {pair} for the same window: "
-                    "'no_failures' = requests were served and none failed (treat as 0%); "
-                    "'no_requests' = no requests of this type in that bucket.")
+                    "'unknown_or_no_failures' = requests were served but no failure data was reported; "
+                    "this usually means no request failed, but the metric itself cannot confirm it, so "
+                    "say so rather than stating 0%; "
+                    "'no_requests' = the request count was 0 in that bucket; "
+                    f"'no_data' = neither this metric nor {pair} reported a point (e.g. the operation "
+                    "had never been used yet).")
             else:
                 res["null_note"] = NULL_NOTE_UNEXPLAINED
 
@@ -203,12 +222,9 @@ def series_by_timestamp(results: List[Dict[str, Any]]) -> Dict[str, Dict[str, Op
             for r in results}
 
 
-def explain_api_error(err: str, names: List[str]) -> str:
-    """Append actionable context to a server-side metrics error."""
-    extra = []
-    if "metrics name is invalid" in err:
-        extra.append("Valid metric names: " + ", ".join(METRICS))
+def api_error_fix(names: List[str]) -> Optional[str]:
+    """Extra fix text for a server-side rejection of these metric names, if any applies."""
     if any(n in ("READ_VCU", "WRITE_VCU") for n in names):
-        extra.append("READ_VCU / WRITE_VCU are only available on Serverless clusters; "
-                     "Dedicated clusters reject them.")
-    return (err + " " + " ".join(extra)).strip()
+        return ("READ_VCU / WRITE_VCU are only available on Serverless clusters; Dedicated clusters "
+                "reject them. Remove them, or use CU_COMPUTATION / CU_CAPACITY on Dedicated clusters.")
+    return None
