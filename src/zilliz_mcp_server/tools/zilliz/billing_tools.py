@@ -40,7 +40,13 @@ _GROUP_KEYS = {
     'region': lambda bucket, item: item.get('properties', {}).get('regionId'),
     'cost_type': lambda bucket, item: item.get('costType'),
     'day': lambda bucket, item: bucket.get('intervalStart', '')[:10],
+    'month': lambda bucket, item: bucket.get('intervalStart', '')[:7],
 }
+_DATE_GROUPS = ('day', 'month')
+
+# group_by="day" over more than this many days leaves out each day's by_cost_type: a year of
+# daily breakdowns is ~90 KB, more than MCP clients reliably show in full.
+LONG_RANGE_DAYS = 92
 
 _INVOICE_FIELDS = {
     'invoice_id': 'id',
@@ -148,15 +154,16 @@ async def get_usage_summary(
     Args:
         start: First day of the range in YYYY-MM-DD format (UTC)
         end: Last day of the range in YYYY-MM-DD format (UTC, inclusive). Maximum range is 366 days.
-        group_by: How to group costs: "cluster", "project", "cost_type", "region" or "day" (default: "cluster")
+        group_by: How to group costs: "cluster", "project", "cost_type", "region", "day" or "month" (default: "cluster").
+                  For ranges over 92 days prefer "month"; "day" then leaves out each day's by_cost_type.
         cluster_id: Only include usage for this cluster (optional)
         project_id: Only include usage for this project (optional)
         limit: Maximum number of groups to return (default 20, max 200). Smaller groups are
                rolled up into one "other" entry so the total still adds up. Ignored for
-               group_by="day", which always returns every day in date order.
+               group_by="day" and "month", which always return every period in date order.
     Returns:
         Dict with the total and groups sorted by amount (highest first; by date for
-        group_by="day"). Amounts are decimal
+        group_by="day" / "month"). Amounts are decimal
         values in whole units of the returned currency (e.g. 12.34 = 12.34 USD, not cents),
         rounded to 2 decimal places after summing. Usage not tied to a cluster/project/region
         (e.g. org-level charges) is grouped as "unattributed". group_count is the number of
@@ -212,12 +219,19 @@ async def get_usage_summary(
         if len(currencies) > 1:
             raise ValueError(f"usage spans multiple currencies: {', '.join(sorted(currencies))}")
 
-        if group_by == 'day':
+        if group_by in _DATE_GROUPS:
             ranked = sorted(group_amounts.items())
             kept, rest = ranked, []
         else:
             ranked = sorted(group_amounts.items(), key=lambda kv: kv[1], reverse=True)
             kept, rest = ranked[:limit], ranked[limit:]
+        notes = []
+        with_cost_types = group_by != 'cost_type'
+        if group_by == 'day' and len(results) > LONG_RANGE_DAYS:
+            with_cost_types = False
+            notes.append(f"by_cost_type is left out per day for ranges over {LONG_RANGE_DAYS} days to keep the "
+                         "result small; use group_by=month for monthly cost by cost_type, or a range of "
+                         f"{LONG_RANGE_DAYS} days or less for daily detail.")
 
         def share(amount: Decimal) -> float:
             return float((amount / total * 100).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)) if total else 0.0
@@ -227,9 +241,10 @@ async def get_usage_summary(
             group = {
                 'key': key,
                 'amount': _money(amount),
-                'share_percent': share(amount),
             }
-            if group_by != 'cost_type':
+            if group_by not in _DATE_GROUPS:  # a day's share of the range says little
+                group['share_percent'] = share(amount)
+            if with_cost_types:
                 group['by_cost_type'] = {
                     cost_type: _money(value)
                     for cost_type, value in sorted(group_cost_types[key].items(), key=lambda kv: kv[1], reverse=True)
@@ -253,7 +268,7 @@ async def get_usage_summary(
         # Log results
         logger.info(f"GET_USAGE_SUMMARY RESULT: total={summary['total']}, groups={len(groups)}")
 
-        return hints.ok(summary)
+        return hints.ok(summary, None, notes)
 
     except Exception as e:
         logger.error(f"GET_USAGE_SUMMARY ERROR: {str(e)}")
