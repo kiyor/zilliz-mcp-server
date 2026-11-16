@@ -36,21 +36,51 @@ class TestDuration:
 
 
 class TestCoverageHints:
-    def test_all_null_coarse_suggests_finer_same_window_and_recent(self):
+    def test_all_null_coarse_suggests_readable_recent_windows(self):
         steps, notes = m.coverage_hints(res([None] * 180), CID, MQ, "P1D", "P180D", None, None)
         assert "does NOT mean no traffic" in notes[0] and "0/180" in notes[0]
-        assert steps[0]["args"] == {"cluster_id": CID, "period": "P180D", "granularity": "PT15M",
+        assert steps[0]["args"] == {"cluster_id": CID, "period": "PT4H", "granularity": "PT30S",
                                     "metric_queries": MQ}
-        assert steps[1]["args"]["period"] == "P7D" and steps[1]["args"]["granularity"] == "PT30S"
+        assert (steps[1]["args"]["period"], steps[1]["args"]["granularity"]) == ("PT16H", "PT2M")
 
-    def test_one_day_at_pt1h_suggests_pt30s_only(self):
+    @pytest.mark.parametrize("n_metrics", [1, 2, 4, 6])
+    def test_suggestions_stay_readable(self, n_metrics):
+        mq = [{"metricName": "REQ_SEARCH_COUNT"}] * n_metrics
+        steps, _ = m.coverage_hints(res([None] * 180), CID, mq, "P1D", "P180D", None, None)
+        assert steps
+        for s in steps:
+            pts = m.duration_seconds(s["args"]["period"]) / m.duration_seconds(s["args"]["granularity"])
+            assert pts * n_metrics <= m.READABLE_POINTS
+
+    def test_one_day_at_pt1h(self):
         steps, _ = m.coverage_hints(res([None] * 24), CID, MQ, "PT1H", "P1D", None, None)
-        assert len(steps) == 1 and steps[0]["args"]["granularity"] == "PT30S"
+        assert [(s["args"]["period"], s["args"]["granularity"]) for s in steps] == [("PT4H", "PT30S"),
+                                                                                   ("PT16H", "PT2M")]
 
-    def test_start_end_window_kept(self):
+    def test_start_end_window_keeps_its_last_part(self):
         s, e = "2026-11-01T00:00:00Z", "2026-11-08T00:00:00Z"
         steps, _ = m.coverage_hints(res([None] * 168), CID, MQ, "PT1H", None, s, e)
-        assert steps[0]["args"]["start"] == s and steps[0]["args"]["end"] == e and "period" not in steps[0]["args"]
+        a = steps[0]["args"]
+        assert a["start"] == "2026-11-07T20:00:00Z" and a["end"] == e and "period" not in a
+
+    def test_series_summary(self):
+        r = res([None, "2", None, "5.5", None])
+        r[0]["values"] = [{"timestamp": f"2026-11-16T0{i}:00:00Z", "value": p["value"]}
+                          for i, p in enumerate(r[0]["values"])]
+        s = m.series_summary(r)
+        assert "REQ_SEARCH_COUNT: 2/5 buckets with a value" in s
+        assert "first 2026-11-16T01:00:00Z, last 2026-11-16T03:00:00Z, max 5.5" in s
+        assert m.series_summary(res(["1", "2"])) is None
+        assert "0/3 buckets" in m.series_summary(res([None] * 3))
+
+    def test_unexplained_null_note_does_not_contradict_sparse_note(self):
+        results = res([None] * 168)
+        m.annotate(results, {})
+        _, notes = m.coverage_hints(results, CID, MQ, "PT1H", "P7D", None, None)
+        text = results[0]["null_note"] + " ".join(notes)
+        assert "report 0 (not null)" not in text
+        assert "never been called" not in text
+        assert "coarser than PT2M" in results[0]["null_note"]
 
     def test_good_coverage_is_quiet(self):
         assert m.coverage_hints(res(["1"] * 24), CID, MQ, "PT1H", "P1D", None, None) == ([], [])
@@ -68,6 +98,7 @@ async def test_tool_returns_coverage_hint(client):
         cluster_id=CID, period="P7D", granularity="P1D", metric_queries=MQ))
     assert out["next_steps"][0]["args"]["granularity"] == "PT30S"
     assert any("does NOT mean no traffic" in n for n in out["notes"])
+    assert out["notes"][0].startswith("Per series: REQ_SEARCH_COUNT: 1/4 buckets with a value")
     assert out["data"]["results"][0]["values"][0]["value_status"] == "no_data"
 
 
