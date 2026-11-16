@@ -200,3 +200,8 @@ class TestNextSteps:
     def test_metrics_all_empty(self):
         _, notes = ns.query_cluster_metrics({"results": [{"name": "A", "values": []}]}, CID)
         assert "No data points" in notes[0]
+
+
+def test_hints_precede_data_so_truncation_keeps_them():
+    out = hints.ok({"results": ["x" * 1000]}, [hints.step("t", "w")], ["n"])
+    assert out.index('"notes"') < out.index('"next_steps"') < out.index('"data"')
