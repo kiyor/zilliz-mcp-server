@@ -249,11 +249,11 @@ class TestQueryDailyUsage:
 
         mock_client.control_plane_api_request.return_value = usage_response
 
-        result = _data(await query_daily_usage("2026-09-16", "2026-09-17"))
+        result = _data(await query_daily_usage("2026-09-16", "2026-09-17", project_id="proj-1"))
 
         assert [d["day"] for d in result] == ["2026-09-16", "2026-09-17"]
         assert result[0]["currency"] == "USD"
-        assert len(result[0]["items"]) == 3
+        assert len(result[0]["items"]) == 2
         assert result[0]["items"][0]["cost_type"] == "compute"
         assert result[0]["items"][0]["properties"]["clusterId"] == "in01-a"
 

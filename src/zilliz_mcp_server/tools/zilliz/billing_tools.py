@@ -12,17 +12,26 @@ from zilliz_mcp_server.app import zilliz_mcp
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# The usage API returns the whole range in one response (~70 KB per day for a
-# busy org), so cap how much we pull through the server and into the agent.
+# The usage API returns the whole range in one response (~85 KB per day for an
+# org with ~200 clusters), so cap how much we pull through the server and into the agent.
 MAX_SUMMARY_DAYS = 366
 MAX_RAW_DAYS = 7
+# Org-wide usage is large (measured ~85 KB of JSON per day for an org with ~200 clusters),
+# so cap what reaches the model.
+DEFAULT_GROUP_LIMIT = 20
+MAX_GROUP_LIMIT = 200
+MAX_LINE_ITEMS = 200
+MAX_INVOICE_PAGE_SIZE = 100
+# List Invoices returns this business code ("An unknown error occurred") when pageSize or
+# currentPage is missing.
+INVOICE_UNKNOWN_ERROR_CODE = 20011
 
 UNATTRIBUTED = "unattributed"
 
 INVOICE_AMOUNT_UNIT_NOTE = (
-    "Amounts are returned exactly as the API reports them. The API documentation does not state "
-    "whether they are whole currency units or minor units (e.g. cents); confirm against the "
-    "invoice in the Zilliz Cloud console before quoting a figure."
+    "Invoice amounts are integers in whole units of 'currency' (e.g. USD dollars, not cents), "
+    "rounded by billing. usage_amount is close to, but not exactly, the sum of daily usage for "
+    "the period; quote invoice figures for what was billed."
 )
 
 _GROUP_KEYS = {
@@ -111,13 +120,14 @@ async def get_usage_summary(
     end: str,
     group_by: str = "cluster",
     cluster_id: Optional[str] = None,
-    project_id: Optional[str] = None
+    project_id: Optional[str] = None,
+    limit: int = DEFAULT_GROUP_LIMIT
 ) -> str:
     """
     Summarize Zilliz Cloud billing usage (cost) for the organization over a date range.
     Prefer this tool for cost questions such as "what did cluster X cost last month"
-    or "what is my biggest cost driver". Requires an API key belonging to an
-    with the Organization Owner or Organization Billing Admin role (a personal key uses
+    or "what is my biggest cost driver". Requires an API key with the Organization
+    Owner or Organization Billing Admin role (a personal key uses
     its user's role; a customized key has its own role). Otherwise it fails with error
     PERMISSION_DENIED; relay its fix and message_for_admin to the user instead of
     estimating costs. AUTH_FAILED means the key itself is invalid, not a missing role.
@@ -141,10 +151,16 @@ async def get_usage_summary(
         group_by: How to group costs: "cluster", "project", "cost_type", "region" or "day" (default: "cluster")
         cluster_id: Only include usage for this cluster (optional)
         project_id: Only include usage for this project (optional)
+        limit: Maximum number of groups to return (default 20, max 200). Smaller groups are
+               rolled up into one "other" entry so the total still adds up.
     Returns:
-        Dict with the total and groups sorted by amount (highest first). Amounts are in
-        the returned currency, rounded to 2 decimal places after summing. Usage not tied
-        to a cluster/project/region (e.g. org-level charges) is grouped as "unattributed".
+        Dict with the total and groups sorted by amount (highest first). Amounts are decimal
+        values in whole units of the returned currency (e.g. 12.34 = 12.34 USD, not cents),
+        rounded to 2 decimal places after summing. Usage not tied to a cluster/project/region
+        (e.g. org-level charges) is grouped as "unattributed". group_count is the number of
+        groups before the limit; when it exceeds the limit the last entry has key "other"
+        and other_group_count. Narrow with cluster_id / project_id or a coarser group_by
+        (project, cost_type) instead of raising the limit.
         Example:
         {
             "start": "2026-09-01",
@@ -169,6 +185,8 @@ async def get_usage_summary(
 
         if group_by not in _GROUP_KEYS:
             raise ValueError(f"group_by must be one of: {', '.join(_GROUP_KEYS)}")
+        if not isinstance(limit, int) or not 1 <= limit <= MAX_GROUP_LIMIT:
+            raise ValueError(f"limit must be an integer from 1 to {MAX_GROUP_LIMIT}")
         key_of = _GROUP_KEYS[group_by]
 
         results = _fetch_usage(start, end, MAX_SUMMARY_DAYS)
@@ -192,12 +210,18 @@ async def get_usage_summary(
         if len(currencies) > 1:
             raise ValueError(f"usage spans multiple currencies: {', '.join(sorted(currencies))}")
 
+        ranked = sorted(group_amounts.items(), key=lambda kv: kv[1], reverse=True)
+        kept, rest = ranked[:limit], ranked[limit:]
+
+        def share(amount: Decimal) -> float:
+            return float((amount / total * 100).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)) if total else 0.0
+
         groups = []
-        for key, amount in sorted(group_amounts.items(), key=lambda kv: kv[1], reverse=True):
+        for key, amount in kept:
             group = {
                 'key': key,
                 'amount': _money(amount),
-                'share_percent': float((amount / total * 100).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)) if total else 0.0,
+                'share_percent': share(amount),
             }
             if group_by != 'cost_type':
                 group['by_cost_type'] = {
@@ -205,6 +229,10 @@ async def get_usage_summary(
                     for cost_type, value in sorted(group_cost_types[key].items(), key=lambda kv: kv[1], reverse=True)
                 }
             groups.append(group)
+        if rest:
+            rest_amount = sum((amount for _, amount in rest), Decimal(0))
+            groups.append({'key': 'other', 'amount': _money(rest_amount), 'share_percent': share(rest_amount),
+                           'other_group_count': len(rest)})
 
         summary = {
             'start': start,
@@ -212,6 +240,7 @@ async def get_usage_summary(
             'currency': currencies.pop() if currencies else None,
             'group_by': group_by,
             'total': _money(total),
+            'group_count': len(ranked),
             'groups': groups,
         }
 
@@ -235,10 +264,13 @@ async def query_daily_usage(
     project_id: Optional[str] = None
 ) -> str:
     """
-    Query raw daily billing usage line items for the organization. Use this when you
-    need per-day detail (e.g. to chart daily cost); for totals and breakdowns prefer
-    get_usage_summary. Requires an API key belonging to an organization owner or
-    billing admin; otherwise it fails with error PERMISSION_DENIED.
+    Query daily billing usage. Use this when you need per-day detail (e.g. to chart daily
+    cost); for totals and breakdowns prefer get_usage_summary. Without cluster_id or
+    project_id it returns only each day's total and cost by cost_type (org-wide line items
+    are far too large to return). With a filter it also returns that scope's line items
+    (at most 200 across the range; items_truncated tells you when more were cut).
+    Requires an API key with the Organization Owner or Organization Billing Admin role;
+    otherwise it fails with error PERMISSION_DENIED.
 
     Amounts are metered usage BEFORE credits, discounts, advance pay and tax, not the
     invoiced amount. Use list_invoices for invoiced totals.
@@ -258,23 +290,26 @@ async def query_daily_usage(
         cluster_id: Only include line items for this cluster (optional)
         project_id: Only include line items for this project (optional)
     Returns:
-        List of daily buckets. Each item's cost_type may be e.g. compute, storage, backup,
-        read_vcu, write_vcu, storage_serverless, pipeline_tokens, query_cu_ondemand,
-        indexing_cu, lakebase_storage, data_transfer_new, audit_log_cu. Amounts and unit
-        prices are in the bucket's currency. When a filter is set, total covers only the
-        matching items.
+        List of daily buckets with day, currency, total and by_cost_type; plus items when a
+        filter is set. cost_type may be e.g. compute, storage, backup, read_vcu, write_vcu,
+        storage_serverless, stage, pipeline_tokens, query_cu_ondemand, indexing_cu,
+        lakebase_storage, lakebase_storage_request, data_transfer_new, audit_log_cu.
+        Amounts and unit prices are decimal values in whole units of the bucket's currency
+        (e.g. USD, not cents); amount = quantity x unit_price. When a filter is set, total
+        covers only the matching items. Item properties omit keys whose value is null.
         Example:
         [
             {
                 "day": "2026-09-16",
                 "currency": "USD",
                 "total": 10.6234567891,
+                "by_cost_type": {"compute": 10.56, "storage": 0.06},
                 "items": [
                     {
                         "cost_type": "compute",
-                        "properties": {"projectId": "proj-xxx", "regionId": "aws-us-west-2", "clusterId": "in01-xxx", "plan": "Enterprise", "cuType": "Performance-optimized"},
+                        "properties": {"projectId": "proj-xxx", "regionId": "aws-us-west-2", "clusterId": "in01-xxx", "cuType": "Performance-optimized"},
                         "quantity": 24.0,
-                        "unit": "cu_hour",
+                        "unit": "hour",
                         "list_unit_price": 0.44,
                         "unit_price": 0.44,
                         "amount": 10.56
@@ -292,26 +327,37 @@ async def query_daily_usage(
 
         filtered = cluster_id or project_id
         days = []
+        budget = MAX_LINE_ITEMS
         for bucket in results:
             items = [item for item in bucket.get('items') or [] if _item_matches(item, cluster_id, project_id)]
             total = float(sum((_decimal(item.get('amount')) for item in items), Decimal(0))) if filtered else bucket.get('total')
-            days.append({
+            by_cost_type: Dict[str, Decimal] = defaultdict(Decimal)
+            for item in items:
+                by_cost_type[item.get('costType') or UNATTRIBUTED] += _decimal(item.get('amount'))
+            day = {
                 'day': bucket.get('intervalStart', '')[:10],
                 'currency': bucket.get('currency'),
                 'total': total,
-                'items': [
+                'by_cost_type': {k: _money(v) for k, v in sorted(by_cost_type.items(), key=lambda kv: kv[1], reverse=True)},
+            }
+            if filtered:
+                shown = items[:budget]
+                budget -= len(shown)
+                day['items'] = [
                     {
                         'cost_type': item.get('costType'),
-                        'properties': item.get('properties') or {},
+                        'properties': {k: v for k, v in (item.get('properties') or {}).items() if v is not None},
                         'quantity': item.get('quantity'),
                         'unit': item.get('unit'),
                         'list_unit_price': (item.get('listPrice') or {}).get('unitPrice'),
                         'unit_price': (item.get('price') or {}).get('unitPrice'),
                         'amount': item.get('amount'),
                     }
-                    for item in items
-                ],
-            })
+                    for item in shown
+                ]
+                if len(items) > len(shown):
+                    day['items_truncated'] = len(items) - len(shown)
+            days.append(day)
 
         # Log results
         logger.info(f"QUERY_DAILY_USAGE RESULT: returned {len(days)} days")
@@ -332,8 +378,8 @@ async def list_invoices(page_size: int = 10, current_page: int = 1) -> str:
     an organization owner or billing admin; otherwise it fails with error PERMISSION_DENIED.
 
     Args:
-        page_size: The number of invoices to include in each response (default: 10)
-        current_page: The current page number (default: 1)
+        page_size: The number of invoices to include in each response (1-100, default: 10)
+        current_page: The current page number (starts at 1, default: 1)
     Returns:
         Dict containing the invoice count and invoices
         Example:
@@ -341,7 +387,7 @@ async def list_invoices(page_size: int = 10, current_page: int = 1) -> str:
             "count": 1,
             "current_page": 1,
             "page_size": 10,
-            "amount_unit_note": "Amounts are returned exactly as the API reports them. ...",
+            "amount_unit_note": "Invoice amounts are integers in whole units of 'currency' ...",
             "invoices": [
                 {
                     "invoice_id": "inv-xxxxxxxxxxxxxxx",
@@ -352,30 +398,34 @@ async def list_invoices(page_size: int = 10, current_page: int = 1) -> str:
                     "due_date": "2026-09-15T00:00:00Z",
                     "currency": "USD",
                     "status": "paid",
-                    "usage_amount": 100.5,
-                    "credits_applied": 10.0,
+                    "usage_amount": 101,
+                    "credits_applied": 10,
                     "already_billed_amount": 0,
-                    "subtotal": 90.5,
+                    "subtotal": 91,
                     "tax": 0,
-                    "total": 90.5,
+                    "total": 91,
                     "advance_pay_amount": 0,
                     "amount_due": 0
                 }
             ]
         }
         status is one of: unbilled, unconfirmed, disputed, unpaid, overdue, paid, void.
-        Amounts are passed through unchanged. The API documentation does not say whether they
-        are whole currency units or minor units (cents), so do not convert them; quote them with
-        that caveat or confirm against the console invoice.
+        Amounts are integers in whole units of currency (e.g. 91 = 91 USD, not cents).
         usage_amount is metered usage before credits; total / amount_due reflect credits,
         advance pay and tax.
         The current period's invoice has status "unbilled" and its amounts are still accruing.
+        count is the total number of invoices; page with current_page if count > page_size.
 
     """
     try:
         # Log request
         logger.info(f"LIST_INVOICES: page_size={page_size}, current_page={current_page}")
 
+        # The API needs both parameters; without either it fails with code 20011 ("unknown error").
+        if not isinstance(page_size, int) or not 1 <= page_size <= MAX_INVOICE_PAGE_SIZE:
+            raise ValueError(f"page_size must be an integer from 1 to {MAX_INVOICE_PAGE_SIZE}")
+        if not isinstance(current_page, int) or current_page < 1:
+            raise ValueError("current_page must be an integer >= 1")
         params = {
             'pageSize': page_size,
             'currentPage': current_page
@@ -400,24 +450,34 @@ async def list_invoices(page_size: int = 10, current_page: int = 1) -> str:
 
     except Exception as e:
         logger.error(f"LIST_INVOICES ERROR: {str(e)}")
-        raise hints.tool_error("list_invoices", e,
-                               {'page_size': page_size, 'current_page': current_page}) from e
+        ctx = {'page_size': page_size, 'current_page': current_page}
+        structured = hints.tool_error("list_invoices", e, ctx)
+        if getattr(e, 'code', None) == INVOICE_UNKNOWN_ERROR_CODE:
+            structured = hints.StructuredToolError({
+                **structured.payload,
+                'fix': "The billing API returned its generic 'unknown error' (code 20011). It returns this "
+                       "when pageSize or currentPage is missing; this tool always sends both, so retry once. "
+                       "If it persists, it is a server-side problem: tell the user to check the Billing page "
+                       "in the Zilliz Cloud console or contact Zilliz support.",
+                'next_steps': [hints.step('list_invoices', 'Retry once with explicit paging.',
+                                          page_size=page_size, current_page=current_page)],
+            })
+        raise structured from e
 
 
 @zilliz_mcp.tool()
 async def describe_invoice(invoice_id: str) -> str:
     """
-    Describe an invoice in detail. Requires an API key belonging to an organization
-    owner or billing admin; otherwise it fails with error PERMISSION_DENIED.
+    Describe one invoice. It returns the same fields as an entry of list_invoices, so prefer
+    list_invoices (with page_size up to 100) unless you only have the id: this endpoint can
+    take from several seconds to over a minute. Requires an API key with the Organization
+    Owner or Organization Billing Admin role; otherwise it fails with error PERMISSION_DENIED.
 
     Args:
         invoice_id: ID of the invoice to describe (from list_invoices)
     Returns:
         Dict containing the invoice, with the same fields as each entry of list_invoices.
-        It also includes amount_unit_note: amounts are passed through unchanged and their unit
-        (whole currency units vs cents) is not documented.
-        The API currently returns a server error for the current "unbilled" invoice;
-        use list_invoices to read that one.
+        Amounts are integers in whole units of currency (see amount_unit_note).
 
     """
     try:
