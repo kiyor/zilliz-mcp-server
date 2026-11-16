@@ -154,9 +154,10 @@ async def get_cluster_activity_history(cluster_id: str, days: int = 180,
         if not isinstance(days, int) or not 1 <= days <= MAX_DAYS:
             raise ValueError(f"days must be an integer from 1 to {MAX_DAYS}, got {days!r}.")
         names = [str(m).strip().upper() for m in (metrics or DEFAULT_METRICS)]
-        bad = [n for n in names if not n.endswith("_COUNT")]
+        bad = [n for n in names if not (n.startswith(("REQ_", "VECTOR_REQ_")) and n.endswith("_COUNT"))]
         if bad:
-            raise ValueError(f"metrics must be request-count metrics (names ending in _COUNT); got {bad}.")
+            raise ValueError("metrics must be request-count metrics (REQ_*_COUNT or VECTOR_REQ_*_COUNT); "
+                             f"got {bad}.")
         now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
         start = now - timedelta(days=days)
         cluster = (openapi_client.control_plane_api_request(f"/v2/clusters/{cluster_id}").get("data") or {})
@@ -187,9 +188,12 @@ async def get_cluster_activity_history(cluster_id: str, days: int = 180,
                 why = "timed out" if t in pending else str(t.exception())[:80]
                 failed.append(f"{s:%Y-%m-%d}..{e:%Y-%m-%d} ({why})")
         if parts and not got:
-            first_err = next((t.exception() for t in tasks if t in done and t.exception()), None)
+            first_err = next((t.exception() for t in tasks if t in done and not t.cancelled() and t.exception()),
+                             None)
             if first_err:
                 raise first_err
+            raise TimeoutError(f"none of the {len(parts)} metric chunks finished within {TOTAL_TIMEOUT_S}s; "
+                               "activity is unknown. Retry with fewer days.")
         report: Dict[str, Any] = {"window_start": start.strftime(_FMT), "window_end": now.strftime(_FMT),
                                   "granularity": GRANULARITY, "chunks": len(parts),
                                   "failed_chunks": len(failed), "metrics": summarize(got, names)}
