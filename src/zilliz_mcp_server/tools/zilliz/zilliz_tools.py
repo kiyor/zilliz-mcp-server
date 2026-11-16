@@ -375,13 +375,15 @@ async def query_cluster_metrics(
             (use instead of start/end). Week and month units such as "P2W" or "P6M" are rejected;
             write 6 months as "P180D".
         granularity: Bucket size in ISO 8601, minimum PT30S (e.g. PT30S, PT1M, PT5M, PT1H, P1D).
-            Choose it with care: each bucket is reported at its timestamp, not aggregated over the
-            bucket, so coarse buckets (PT1H, P1D) can miss short or bursty traffic and return null
-            even when there was activity. Use the finest granularity that keeps
-            window / granularity under about 25,000 buckets (requests with roughly 40,000 buckets
-            fail with an unknown error), e.g. PT30S up to 7 days, PT2M for 30 days, PT10M-PT15M
-            for 180 days. For long-range trends query the long window, then confirm recent activity
-            with a short window at PT30S.
+            Choose it with care: at coarse granularities (PT1H, P1D) windows that have values at
+            PT30S are often reported as null, so short or bursty traffic can look like none.
+            Keep results small enough to read: about 500 points over all requested series
+            (window / granularity x number of metrics), e.g. PT30S for up to 4 hours of one
+            metric, PT2M for about 16 hours. The API itself rejects requests with roughly 40,000
+            buckets (unknown error), but results that large are too long for clients to read.
+            For long-range questions, query the long window for the overall shape, then confirm
+            activity with a short recent window at PT30S; the result's notes summarise each series
+            (buckets with a value, first/last such timestamp, max).
         metric_queries: List of objects {"metricName": <name>, "stat": "AVG"}. 'stat' is optional
             and defaults to AVG. The API ignores stat for aggregation: each bucket holds the value of
             the named metric. Latency percentiles are chosen by the metric NAME (..._LATENCY_AVG vs
@@ -501,7 +503,8 @@ async def query_cluster_metrics(
         steps, notes = ns.query_cluster_metrics(data, cluster_id)
         cov_steps, cov_notes = metrics_catalog.coverage_hints(
             results, cluster_id, metric_queries, granularity, period, start, end)
-        return hints.ok(data, cov_steps + steps, cov_notes + notes)
+        summary = metrics_catalog.series_summary(results)
+        return hints.ok(data, cov_steps + steps, ([summary] if summary else []) + cov_notes + notes)
 
     except Exception as e:
         logger.error(f"QUERY_CLUSTER_METRICS ERROR: {str(e)}")
