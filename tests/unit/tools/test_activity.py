@@ -90,7 +90,23 @@ class TestTool:
             await a.get_cluster_activity_history("c1", days=days)
         assert "INVALID_ARGUMENT" in str(ei.value)
 
-    async def test_non_count_metric_rejected(self):
+    @pytest.mark.parametrize("metric", ["CU_CAPACITY", "ENTITIES_COUNT"])
+    async def test_non_request_metric_rejected(self, metric):
         with pytest.raises(Exception) as ei:
-            await a.get_cluster_activity_history("c1", metrics=["CU_CAPACITY"])
-        assert "_COUNT" in str(ei.value)
+            await a.get_cluster_activity_history("c1", metrics=[metric])
+        assert "INVALID_ARGUMENT" in str(ei.value) and "REQ_" in str(ei.value)
+
+    @patch("zilliz_mcp_server.tools.zilliz.activity.TOTAL_TIMEOUT_S", 0.05)
+    @patch("zilliz_mcp_server.tools.zilliz.activity.openapi_client")
+    async def test_all_chunks_timed_out_is_an_error(self, client):
+        import time
+
+        def req(uri, body_map=None, method="GET"):
+            if method == "GET":
+                return {"data": {}}
+            time.sleep(0.3)
+            return {"data": {"results": []}}
+        client.control_plane_api_request.side_effect = req
+        with pytest.raises(Exception) as ei:
+            await a.get_cluster_activity_history("c1", days=35)
+        assert "none of the 5 metric chunks finished" in str(ei.value)
