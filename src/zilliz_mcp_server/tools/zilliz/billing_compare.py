@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 _GROUPINGS = ("cluster_cost_type", "cluster", "cost_type", "project", "region")
 # A unit price / quantity move smaller than this is treated as "unchanged" when naming the driver.
 _FLAT = Decimal("0.02")
+# Keep the result well under what MCP clients show in full: measured on a large organization,
+# 10 rows + all new/gone keys was ~10 KB and 380 rows was ~100 KB.
+MAX_TOP_N = 50
+MAX_KEY_LIST = 20
 
 
 def _key(item: Dict[str, Any], group_by: str) -> str:
@@ -39,7 +43,8 @@ def _key(item: Dict[str, Any], group_by: str) -> str:
 
 def _aggregate(results: List[Dict[str, Any]], group_by: str) -> Tuple[Dict[str, Dict[str, Any]], set]:
     groups: Dict[str, Dict[str, Any]] = defaultdict(
-        lambda: {"amount": Decimal(0), "quantity": Decimal(0), "units": set(), "cluster": None, "cost_type": None})
+        lambda: {"amount": Decimal(0), "quantity": Decimal(0), "units": set(), "cluster": None, "cost_type": None,
+                 "project": None})
     currencies = set()
     for bucket in results:
         for item in bucket.get("items") or []:
@@ -48,8 +53,15 @@ def _aggregate(results: List[Dict[str, Any]], group_by: str) -> Tuple[Dict[str, 
             g["quantity"] += _decimal(item.get("quantity"))
             if item.get("unit"):
                 g["units"].add(item["unit"])
-            g["cluster"] = (item.get("properties") or {}).get("clusterId")
-            g["cost_type"] = item.get("costType")
+            p = item.get("properties") or {}
+            # Only keep ids that are constant within the group; anything else would point the
+            # next step at an arbitrary cluster/project.
+            if group_by in ("cluster_cost_type", "cluster"):
+                g["cluster"] = p.get("clusterId")
+            if group_by in ("cluster_cost_type", "cost_type"):
+                g["cost_type"] = item.get("costType")
+            if group_by == "project":
+                g["project"] = p.get("projectId")
             currencies.add(bucket.get("currency"))
     currencies.discard(None)
     return groups, currencies
@@ -67,8 +79,9 @@ def _driver(b: Dict[str, Any], t: Dict[str, Any]) -> Dict[str, Any]:
         return {"driver": "new"}
     if b["amount"] and not t["amount"]:
         return {"driver": "gone"}
-    # Quantities in different units cannot be compared.
-    if not b["quantity"] or not t["quantity"] or (b["units"] and t["units"] and b["units"] != t["units"]):
+    # Quantities in different units (e.g. hours + GB summed in a cluster or project group) cannot be compared.
+    if not b["quantity"] or not t["quantity"] or len(b["units"]) > 1 or len(t["units"]) > 1 \
+            or (b["units"] and t["units"] and b["units"] != t["units"]):
         return {"driver": "unknown"}
     pb, pt = b["amount"] / b["quantity"], t["amount"] / t["quantity"]
     qty_effect = (t["quantity"] - b["quantity"]) * pb
@@ -89,17 +102,32 @@ def _driver(b: Dict[str, Any], t: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _invoice_for(invoices: List[Dict[str, Any]], start: date, end: date) -> Optional[Dict[str, Any]]:
+    """Invoices whose billing period starts inside start..end; several are summed."""
+    hits = []
     for inv in invoices:
         try:
             ps = date.fromisoformat(str(inv.get("periodStart", ""))[:10])
         except ValueError:
             continue
         if start <= ps <= end:
-            return {"invoice_id": inv.get("id"), "period_start": inv.get("periodStart"),
-                    "period_end": inv.get("periodEnd"), "status": inv.get("status"),
-                    "usage_amount": inv.get("usageAmount"), "credits_applied": inv.get("creditsApplied"),
-                    "total": inv.get("total")}
-    return None
+            hits.append(inv)
+    if not hits:
+        return None
+    if len(hits) == 1:
+        inv = hits[0]
+        return {"invoice_id": inv.get("id"), "period_start": inv.get("periodStart"),
+                "period_end": inv.get("periodEnd"), "status": inv.get("status"),
+                "usage_amount": inv.get("usageAmount"), "credits_applied": inv.get("creditsApplied"),
+                "total": inv.get("total")}
+    hits.sort(key=lambda i: str(i.get("periodStart")))
+
+    def total(field):
+        return float(sum((_decimal(i.get(field)) for i in hits), Decimal(0)))
+    return {"invoices": len(hits), "period_start": hits[0].get("periodStart"),
+            "period_end": hits[-1].get("periodEnd"),
+            "statuses": sorted({str(i.get("status")) for i in hits}),
+            "usage_amount": total("usageAmount"), "credits_applied": total("creditsApplied"),
+            "total": total("total")}
 
 
 @zilliz_mcp.tool()
@@ -120,8 +148,13 @@ async def compare_billing_periods(
 
     For partial periods (e.g. the current month so far) compare change.daily_avg_pct, not change.pct.
     Usage is metered cost BEFORE credits/discounts/tax. If usage is flat but the bill rose, look at
-    invoice_view (credits_applied). Report amounts exactly as returned, with the currency. The API
-    documentation does not state the amount unit, so do not convert it.
+    invoice_view (credits_applied). Usage amounts are decimals in whole units of currency
+    (e.g. 12.34 = 12.34 USD, not cents); invoice_view amounts are integers in whole units, rounded
+    by billing, and an invoice covers its whole billing month even if the period is shorter.
+    Treat quantity as a billing label (compute quantity can be CU-hours with unit "hour").
+    driver is only computed when both periods use one and the same unit; groups that mix units
+    (typical for group_by=cluster/project/region) get driver "unknown": use cluster_cost_type for
+    a quantity vs price split.
 
     Args:
         base_start: First day of the earlier period, YYYY-MM-DD (UTC), e.g. "2026-09-01"
@@ -129,9 +162,9 @@ async def compare_billing_periods(
         target_start: First day of the later period, YYYY-MM-DD, e.g. "2026-10-01"
         target_end: Last day of the later period, inclusive, YYYY-MM-DD, e.g. "2026-10-31". Each period max 366 days.
         group_by: "cluster_cost_type" (default), "cluster", "cost_type", "project" or "region"
-        top_n: How many of the largest changes to return (default 10)
+        top_n: How many of the largest changes to return (default 10, max 50)
     Returns:
-        JSON {"data": <result>, "next_steps": [...], "notes": [...]}. <result>:
+        JSON {"notes": [...], "next_steps": [...], "data": <result>}. <result>:
         {"currency": "USD",
          "base": {"start", "end", "days", "usage_total", "daily_avg"},
          "target": {"start", "end", "days", "usage_total", "daily_avg"},
@@ -140,8 +173,9 @@ async def compare_billing_periods(
                           "share_of_change_pct", "driver": "quantity|price|both|flat|new|gone|unknown",
                           "quantity_effect", "price_effect", "base_quantity", "target_quantity",
                           "quantity_pct", "unit_price_pct", "unit"}],
-         "new_keys": [...], "gone_keys": [...],
-         "invoice_view": {"base": {...}|null, "target": {...}|null} (omitted if invoices are unavailable)}
+         "new_keys": [...], "gone_keys": [...] (largest 20 each; new_key_count / gone_key_count give totals),
+         "invoice_view": {"base": {...}|null, "target": {...}|null} (omitted if invoices are unavailable;
+                          a period spanning several invoices gets their sum with "invoices": <count>)}
         quantity_effect + price_effect = abs for groups that exist in both periods (same unit).
     """
     ctx = {"base_start": base_start, "base_end": base_end, "target_start": target_start,
@@ -150,6 +184,8 @@ async def compare_billing_periods(
         logger.info(f"COMPARE_BILLING_PERIODS: {ctx}")
         if group_by not in _GROUPINGS:
             raise ValueError(f"group_by must be one of: {', '.join(_GROUPINGS)}")
+        if not 1 <= top_n <= MAX_TOP_N:
+            raise ValueError(f"top_n must be between 1 and {MAX_TOP_N}")
         bs, be = _parse_range(base_start, base_end, MAX_SUMMARY_DAYS)
         ts, te = _parse_range(target_start, target_end, MAX_SUMMARY_DAYS)
 
@@ -179,11 +215,13 @@ async def compare_billing_periods(
             if units:
                 row["unit"] = sorted(units)[0]
             row["_abs"] = abs(d)
-            row["_cluster"] = t.get("cluster") or b.get("cluster")
-            row["_cost_type"] = t.get("cost_type") or b.get("cost_type")
+            for f in ("cluster", "cost_type", "project"):
+                row[f"_{f}"] = t.get(f) or b.get(f)
             rows.append(row)
         rows.sort(key=lambda r: (-r["_abs"], r["key"]))
-        top = rows[:max(1, top_n)]
+        top = rows[:top_n]
+        new_rows = [r for r in rows if r.get("driver") == "new"]
+        gone_rows = [r for r in rows if r.get("driver") == "gone"]
 
         result: Dict[str, Any] = {
             "currency": currencies.pop() if currencies else None,
@@ -193,9 +231,11 @@ async def compare_billing_periods(
                        "usage_total": _money(ttot), "daily_avg": _money(tavg)},
             "change": {"abs": _money(delta), "pct": _pct(ttot, btot), "daily_avg_pct": _pct(tavg, bavg)},
             "top_changes": [{k: v for k, v in r.items() if not k.startswith("_")} for r in top],
-            "new_keys": sorted(r["key"] for r in rows if r.get("driver") == "new"),
-            "gone_keys": sorted(r["key"] for r in rows if r.get("driver") == "gone"),
+            "new_keys": [r["key"] for r in new_rows[:MAX_KEY_LIST]],
+            "gone_keys": [r["key"] for r in gone_rows[:MAX_KEY_LIST]],
         }
+        if len(new_rows) > MAX_KEY_LIST or len(gone_rows) > MAX_KEY_LIST:
+            result["new_key_count"], result["gone_key_count"] = len(new_rows), len(gone_rows)
 
         notes: List[str] = []
         try:
@@ -212,15 +252,17 @@ async def compare_billing_periods(
             notes.append("No usage in either period: check the dates, or whether this key's organization is the billed one.")
 
         steps: List[Dict[str, Any]] = []
-        lead = next((r for r in top if r["_abs"] and r["_cluster"]), None)
+        lead = top[0] if top and top[0]["_abs"] else None
         if lead:
             window_end = min(te, ts + timedelta(days=MAX_RAW_DAYS - 1))
+            scope = {"cluster_id": lead["_cluster"]} if lead["_cluster"] else (
+                {"project_id": lead["_project"]} if lead["_project"] else {})
             steps.append(hints.step(
                 "query_daily_usage",
                 f"Largest change is {lead['key']} ({lead['abs']:+}, driver={lead['driver']}); "
-                "look at daily rows to find the day it started (7 days per call, step forward through the period).",
-                start=ts.isoformat(), end=window_end.isoformat(), cluster_id=lead["_cluster"]))
-            if lead["_cost_type"] == "compute" and lead.get("driver") in ("quantity", "both", "new"):
+                f"look at daily rows to find the day it started ({MAX_RAW_DAYS} days per call).",
+                start=ts.isoformat(), end=window_end.isoformat(), **scope))
+            if lead["_cluster"] and lead["_cost_type"] == "compute" and lead.get("driver") in ("quantity", "both", "new"):
                 steps.append(hints.step("describe_cluster", "Compute quantity changed: check the cluster's CU size and status.",
                                         cluster_id=lead["_cluster"]))
 

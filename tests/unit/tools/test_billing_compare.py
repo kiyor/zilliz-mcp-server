@@ -68,7 +68,8 @@ async def test_quantity_driver_new_gone_and_hints():
     assert d["invoice_view"]["target"]["invoice_id"] == "inv-10"
     steps = out["next_steps"]
     assert steps[0]["tool"] == "query_daily_usage"
-    assert steps[0]["args"] == {"start": "2026-10-01", "end": "2026-10-07", "cluster_id": "in01-a"}
+    # query_daily_usage now accepts up to 31 days, so the whole target month fits in one call.
+    assert steps[0]["args"] == {"start": "2026-10-01", "end": "2026-10-31", "cluster_id": "in01-a"}
     assert steps[1]["tool"] == "describe_cluster"
     assert any("daily_avg_pct" in n for n in out["notes"])
 
@@ -134,3 +135,56 @@ async def test_permission_denied_gives_actionable_error():
         assert p.get(k), k
     assert p["next_steps"][0]["tool"] == "compare_billing_periods"
     assert p["next_steps"][0]["args"]["base_start"] == "2026-09-01"
+
+
+@pytest.mark.asyncio
+async def test_top_n_bounded():
+    for bad in (0, 51):
+        with pytest.raises(StructuredToolError) as ei:
+            await _run(top_n=bad)
+        assert ei.value.payload["error"] == "INVALID_ARGUMENT"
+
+
+@pytest.mark.asyncio
+async def test_cost_type_group_does_not_point_at_an_arbitrary_cluster():
+    base = _usage(_item("in01-a", "compute", 100, 100), _item("in01-b", "compute", 100, 100))
+    target = _usage(_item("in01-a", "compute", 300, 300), _item("in01-b", "compute", 100, 100))
+    with patch(f"{MOD}.openapi_client.control_plane_api_request", side_effect=_client(base, target)):
+        out = await _run(group_by="cost_type")
+    assert [s["tool"] for s in out["next_steps"]] == ["query_daily_usage"]
+    assert "cluster_id" not in out["next_steps"][0]["args"]
+
+
+@pytest.mark.asyncio
+async def test_project_group_mixed_units_has_no_price_split_and_scopes_by_project():
+    base = _usage(_item("in01-a", "compute", 100, 100), _item("in01-a", "storage", 10, 5, unit="GB"))
+    target = _usage(_item("in01-a", "compute", 200, 200), _item("in01-a", "storage", 10, 5, unit="GB"))
+    with patch(f"{MOD}.openapi_client.control_plane_api_request", side_effect=_client(base, target)):
+        out = await _run(group_by="project")
+    row = out["data"]["top_changes"][0]
+    assert row["driver"] == "unknown" and "price_effect" not in row
+    assert out["next_steps"][0]["args"]["project_id"] == "proj-1"
+
+
+@pytest.mark.asyncio
+async def test_new_and_gone_lists_capped_with_counts():
+    base = _usage(*[_item(f"in01-g{i:02d}", "compute", 1, i + 1) for i in range(25)])
+    target = _usage(*[_item(f"in01-n{i:02d}", "compute", 1, i + 1) for i in range(25)])
+    with patch(f"{MOD}.openapi_client.control_plane_api_request", side_effect=_client(base, target)):
+        out = await _run(top_n=50)
+    d = out["data"]
+    assert len(d["new_keys"]) == 20 and d["new_key_count"] == 25 and d["gone_key_count"] == 25
+    assert d["new_keys"][0] == "in01-n24 / compute"  # largest first
+
+
+@pytest.mark.asyncio
+async def test_period_spanning_several_invoices_sums_them():
+    base = _usage(_item("in01-a", "compute", 1, 1))
+    with patch(f"{MOD}.openapi_client.control_plane_api_request", side_effect=_client(base, base)):
+        out = await _run(base_start="2026-08-01", base_end="2026-09-30")
+    v = out["data"]["invoice_view"]
+    assert v["base"]["invoice_id"] == "inv-09" and "invoices" not in v["base"]
+    with patch(f"{MOD}.openapi_client.control_plane_api_request", side_effect=_client(base, base)):
+        out = await _run(target_start="2026-09-01", target_end="2026-10-31")
+    t = out["data"]["invoice_view"]["target"]
+    assert t["invoices"] == 2 and t["usage_amount"] == 2000.0 and t["statuses"] == ["paid", "unpaid"]
