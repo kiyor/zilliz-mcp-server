@@ -31,6 +31,11 @@ class TestHelpers:
         assert s["buckets_with_value"] == 3
         assert out["REQ_QUERY_COUNT"]["active_days"] == 0 and out["REQ_QUERY_COUNT"]["first_active"] is None
 
+    def test_boundary_bucket_counted_once(self):
+        b = series("REQ_SEARCH_COUNT", [("2026-11-16T00:00:00Z", "1")])
+        out = a.summarize([[b], [b]], ["REQ_SEARCH_COUNT"])
+        assert out["REQ_SEARCH_COUNT"]["buckets_with_value"] == 1
+
     def test_fit_collapses_to_weeks_when_large(self):
         days = {f"2026-{m:02d}-{d:02d}": 1.0 for m in range(5, 12) for d in range(1, 29)}
         report = {"metrics": {f"REQ_{i}_COUNT": {"peak_by_day": dict(days)} for i in range(5)}}

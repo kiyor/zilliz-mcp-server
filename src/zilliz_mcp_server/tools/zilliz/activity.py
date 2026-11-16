@@ -55,7 +55,7 @@ def _num(v: Any) -> Optional[float]:
 def summarize(results_by_chunk: List[List[Dict[str, Any]]], metrics: List[str]) -> Dict[str, Any]:
     """Per metric: active days (any bucket > 0) with that day's peak, first/last active timestamp."""
     per: Dict[str, Dict[str, Any]] = {m: {"days": {}, "first": None, "last": None, "max": None,
-                                         "reported": 0} for m in metrics}
+                                         "reported": 0, "seen": set()} for m in metrics}
     for results in results_by_chunk:
         for r in results or []:
             m = per.get(r.get("name"))
@@ -65,10 +65,13 @@ def summarize(results_by_chunk: List[List[Dict[str, Any]]], metrics: List[str]) 
                 v = _num(p.get("value"))
                 if v is None:
                     continue
+                ts = p.get("timestamp") or ""
+                if ts in m["seen"]:  # adjacent chunks can both return the boundary bucket
+                    continue
+                m["seen"].add(ts)
                 m["reported"] += 1
                 if v <= 0:
                     continue
-                ts = p.get("timestamp") or ""
                 day = ts[:10]
                 m["days"][day] = max(m["days"].get(day, 0.0), v)
                 m["first"] = ts if m["first"] is None or ts < m["first"] else m["first"]
