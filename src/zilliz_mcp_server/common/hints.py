@@ -147,6 +147,18 @@ def _admin_message(tool: str, resource: Optional[str], action: Optional[str]) ->
             f"Thanks!")
 
 
+def _permission_message(tool: str, resource: Optional[str], action: Optional[str], retry: str,
+                        admin_msg: str, server_msg: str) -> str:
+    """User-facing message for PERMISSION_DENIED: the five things the user needs, in the order they
+    act on them, so a model relaying only 'message' still passes all of them on. The server's own
+    text comes last and is the only part subject to the length rule."""
+    missing = f"the '{resource}:{action}' permission" if resource and action else f"the permission needed for {tool}"
+    return (f"The API key lacks {missing}. Who can grant it: {_who_grants(resource)} "
+            f"({_role_needed(resource, action)}). Where: Zilliz Cloud console; for a personal API key, Access "
+            f"Control > Members > Edit Role; for a customized API key, the key's role under API Keys. Then retry: "
+            f"{retry}. Message to forward to the admin: \"{admin_msg}\" (Server message: {server_msg})")
+
+
 def classify_error(tool: str, exc: Exception, ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Map an exception raised while running ``tool`` to the structured error payload.
 
@@ -168,12 +180,13 @@ def classify_error(tool: str, exc: Exception, ctx: Optional[Dict[str, Any]] = No
     collection = ctx.get("collection_name")
     dp_args = _clean({"cluster_id": cluster_id, "region_id": region_id})
 
+    # Server messages can echo the whole request (e.g. every float of a query vector).
+    # Keep head + tail: the actual cause can follow the echoed payload.
+    # Local validation messages (ValueError) are ours and may list valid choices: never cut them.
+    short = message if (len(message) <= MAX_MESSAGE_CHARS or isinstance(exc, ValueError)) else (
+        message[:200] + " ...(truncated)... " + message[-100:])
+
     def build(kind: str, **kw: Any) -> Dict[str, Any]:
-        # Server messages can echo the whole request (e.g. every float of a query vector).
-        # Keep head + tail: the actual cause can follow the echoed payload.
-        # Local validation messages (ValueError) are ours and may list valid choices: never cut them.
-        short = message if (len(message) <= MAX_MESSAGE_CHARS or isinstance(exc, ValueError)) else (
-            message[:200] + " ...(truncated)... " + message[-100:])
         return _clean({"error": kind, "message": short, **kw})
 
     # --- authentication / authorization -------------------------------------
@@ -182,21 +195,27 @@ def classify_error(tool: str, exc: Exception, ctx: Optional[Dict[str, Any]] = No
                        or "permission denied" in low):
         acl = _ACL_RE.search(message)
         resource, action = (acl.group(1), acl.group(2)) if acl else (None, None)
-        return build(
-            "PERMISSION_DENIED",
+        retry = _call_repr(tool, ctx)
+        admin_msg = _admin_message(tool, resource, action)
+        # Key order matters: clients truncate and models relay the first keys. The message for the
+        # admin and the retry call come right after 'error'; 'message' repeats all five points.
+        return _clean(dict(
+            error="PERMISSION_DENIED",
+            message_for_admin=admin_msg,
+            retry_after_grant=retry,
+            message=_permission_message(tool, resource, action, retry, admin_msg, short),
+            missing_permission=f"{resource}:{action}" if acl else None,
+            who_can_grant=_who_grants(resource),
+            required_role=_role_needed(resource, action),
             field="ZILLIZ_CLOUD_TOKEN",
             expected=f"an API key whose role allows '{action}' on '{resource}'" if acl
             else "an API key whose role allows this operation",
             got=f"resource={resource}, action={action}" if acl else None,
             fix=_permission_fix(resource, action, tool, ctx),
-            missing_permission=f"{resource}:{action}" if acl else None,
-            who_can_grant=_who_grants(resource),
-            required_role=_role_needed(resource, action),
-            message_for_admin=_admin_message(tool, resource, action),
             next_steps=[step(tool, "Retry your previous call unchanged once the permission is granted "
                                    "(args lists only the identifying arguments).",
                              **_clean(ctx))],
-        )
+        ))
     if (http_status == 401 or code in (21119, 1800)
             or "apikey is illegal" in low or "authenticated" in low
             or "unauthorized" in low):
