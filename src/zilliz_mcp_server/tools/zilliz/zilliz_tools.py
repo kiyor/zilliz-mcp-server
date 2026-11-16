@@ -400,10 +400,11 @@ async def query_cluster_metrics(
                 * REQ_FAIL_RATE_DELETE - Delete request failure rate
                 * REQ_FAIL_RATE_SEARCH - Search request failure rate
                 * REQ_FAIL_RATE_QUERY - Query request failure rate
-                * ENTITIES_LOADED - Number of loaded entities
+                * ENTITIES_LOADED - Number of loaded entities, summed over all collections in the cluster
                 * ENTITIES_INSERT_RATE - Entity insert rate
                 * COLLECTIONS_COUNT - Collection count
-                * ENTITIES_COUNT - Total entity count
+                * ENTITIES_COUNT - Total entity count, summed over ALL collections in the cluster
+                  (not a per-collection row count; for one collection use describe_collection -> rowCount)
             - stat: Statistical method (AVG for average, P99 for 99th percentile - P99 only valid for latency metrics)
     Returns:
         JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};

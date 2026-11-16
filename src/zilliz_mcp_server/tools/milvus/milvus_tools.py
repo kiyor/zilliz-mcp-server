@@ -219,7 +219,11 @@ async def describe_collection(
         next_steps/notes are present only when useful. On failure the error text is JSON
         {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
         <result>:
-        Dict containing detailed information about the specified collection
+        Dict containing detailed information about the specified collection, plus
+        "rowCount": number of entities in THIS collection (from collections/get_stats).
+        Use rowCount to answer "how many rows/entities does collection X have" - the
+        cluster metric ENTITIES_COUNT is the total across all collections of the cluster.
+        rowCount is omitted (with a note) if the stats call fails.
         Example (full envelope, hints omitted):
         {
             "data": {
@@ -265,7 +269,8 @@ async def describe_collection(
                 ],
                 "load": "LoadStateLoaded",
                 "partitionsNum": 1,
-                "properties": []
+                "properties": [],
+                "rowCount": 20000
             }
         }
         
@@ -295,8 +300,29 @@ async def describe_collection(
         data = response.get('data', {})
         fields_count = len(data.get('fields', []))
         logger.info(f"DESCRIBE_COLLECTION RESULT: {fields_count} fields found")
-        
-        return hints.ok(data, *ns.describe_collection(data, cluster_id, region_id, db_name))
+
+        # Row count of this collection (describe does not return it)
+        stats_note = None
+        try:
+            stats = openapi_client.data_plane_api_request(
+                uri="/v2/vectordb/collections/get_stats",
+                cluster_id=cluster_id,
+                region_id=region_id,
+                body_map=body,
+                method="POST"
+            )
+            row_count = (stats.get('data') or {}).get('rowCount')
+            if row_count is not None:
+                data['rowCount'] = int(row_count)
+        except Exception as stats_err:
+            logger.warning(f"DESCRIBE_COLLECTION get_stats failed: {stats_err}")
+            stats_note = ("rowCount unavailable (collections/get_stats failed: "
+                          f"{str(stats_err)[:120]}); use query with output_fields=['count(*)'] instead.")
+
+        steps, notes = ns.describe_collection(data, cluster_id, region_id, db_name)
+        if stats_note:
+            notes = [stats_note] + list(notes)
+        return hints.ok(data, steps, notes)
         
     except Exception as e:
         logger.error(f"DESCRIBE_COLLECTION ERROR: {str(e)}")
