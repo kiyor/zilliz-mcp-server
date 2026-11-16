@@ -454,17 +454,18 @@ class TestQueryClusterMetrics:
     async def test_query_cluster_metrics_invalid_metric_query(self, mock_client):
         """Test cluster metrics query with invalid metric query format."""
         from zilliz_mcp_server.tools.zilliz.zilliz_tools import query_cluster_metrics
-        
+
         metric_queries = [
-            {"metricName": "CU_COMPUTATION"}  # Missing 'stat'
+            {"stat": "AVG"}  # Missing 'metricName'
         ]
-        
-        with pytest.raises(Exception, match="Each metric query must contain 'metricName' and 'stat' fields"):
+
+        with pytest.raises(Exception, match="Each metric query must be an object with 'metricName'"):
             await query_cluster_metrics(
                 cluster_id="in01-test123",
                 period="PT1H",
                 metric_queries=metric_queries
             )
+        mock_client.control_plane_api_request.assert_not_called()
 
     @patch('zilliz_mcp_server.tools.zilliz.zilliz_tools.openapi_client')
     async def test_query_cluster_metrics_api_error(self, mock_client):
@@ -486,32 +487,13 @@ class TestQueryClusterMetrics:
 
     @patch('zilliz_mcp_server.tools.zilliz.zilliz_tools.openapi_client')
     async def test_query_cluster_metrics_empty_metric_queries(self, mock_client):
-        """Test cluster metrics query with empty metric queries list."""
+        """Empty metric queries are rejected locally with the list of valid names."""
         from zilliz_mcp_server.tools.zilliz.zilliz_tools import query_cluster_metrics
-        
-        mock_response = {
-            "code": 0,
-            "data": {
-                "results": []
-            }
-        }
-        mock_client.control_plane_api_request.return_value = mock_response
-        
-        result = await query_cluster_metrics(
-            cluster_id="in01-test123",
-            period="PT1H",
-            metric_queries=[]
-        )
-        result_data = json.loads(result)["data"]
-        
-        assert result_data == mock_response["data"]
-        expected_body = {
-            "granularity": "PT30S",
-            "period": "PT1H",
-            "metricQueries": []
-        }
-        mock_client.control_plane_api_request.assert_called_once_with(
-            "/v2/clusters/in01-test123/metrics/query",
-            body_map=expected_body,
-            method="POST"
-        ) 
+
+        with pytest.raises(Exception, match="metric_queries is empty.*Valid metric names"):
+            await query_cluster_metrics(
+                cluster_id="in01-test123",
+                period="PT1H",
+                metric_queries=[]
+            )
+        mock_client.control_plane_api_request.assert_not_called()
