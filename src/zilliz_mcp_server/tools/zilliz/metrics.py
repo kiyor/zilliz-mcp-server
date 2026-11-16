@@ -240,7 +240,7 @@ def api_error_fix(names: List[str]) -> Optional[str]:
 # Buckets per series per request. Observed: 28,800 accepted, 40,320 rejected (error 20011).
 MAX_POINTS = 25000
 # Points (all series together) that a suggested re-query may return so the model can read the
-# whole result: the shared response budget divided by ~100 bytes per point (observed 80-85 bytes
+# whole result: the shared response budget divided by ~100 bytes per point (observed 86-91 bytes
 # per point including value_status).
 READABLE_POINTS = RESULT_BUDGET // 100
 # Finer-to-coarser granularities to suggest when re-querying.
