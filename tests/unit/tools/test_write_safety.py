@@ -72,14 +72,9 @@ class TestSuspendConfirm:
         assert data["confirm_required"] is True
         assert data["cluster"]["cluster_name"] == "prod" and data["cluster"]["status"] == "RUNNING"
         assert "reads, writes and searches fail" in data["impact"]
-        assert env["next_steps"][0] == {"tool": "suspend_cluster", "args": {"cluster_id": "in01-x", "confirm": True},
-                                        "why": env["next_steps"][0]["why"]}
-
-    def test_truthy_non_bool_is_not_confirmation(self, mock_client):
-        from zilliz_mcp_server.tools.zilliz.zilliz_tools import suspend_cluster
-        mock_client.control_plane_api_request.return_value = {"code": 0, "data": {}}
-        asyncio.run(suspend_cluster("in01-x", confirm="yes"))
-        assert mock_client.control_plane_api_request.call_args.kwargs["method"] == "GET"
+        # No executable next step: following hints must not skip the user's confirmation.
+        assert "next_steps" not in env
+        assert "confirm=true" in data["how_to_confirm"] and "explicitly agree" in data["how_to_confirm"]
 
     def test_confirm_true_suspends(self, mock_client):
         from zilliz_mcp_server.tools.zilliz.zilliz_tools import suspend_cluster
@@ -101,7 +96,8 @@ class TestDeleteConfirm:
         assert call["body_map"]["outputFields"] == ["count(*)"] and call["body_map"]["filter"] == "id in [1, 2]"
         assert mock_client.data_plane_api_request.call_count == 1
         assert env["data"]["matching_entities"] == 2 and env["data"]["confirm_required"] is True
-        assert env["next_steps"][0]["args"] == {**self.ARGS, "confirm": True}
+        assert "next_steps" not in env
+        assert "confirm=true" in env["data"]["how_to_confirm"]
 
     def test_preview_survives_count_failure(self, mock_client):
         from zilliz_mcp_server.tools.milvus.milvus_tools import delete_entities
@@ -120,3 +116,48 @@ class TestDeleteConfirm:
         mock_client.data_plane_api_request.return_value = {"code": 0, "data": {}}
         asyncio.run(delete_entities(**self.ARGS, confirm=True))
         assert mock_client.data_plane_api_request.call_args.kwargs["uri"] == "/v2/vectordb/entities/delete"
+
+
+@patch('zilliz_mcp_server.tools.zilliz.zilliz_tools.openapi_client')
+class TestSuspendAlreadySuspended:
+    @pytest.mark.parametrize("status", ["SUSPENDED", "SUSPENDING"])
+    def test_preview_says_no_confirmation_needed(self, mock_client, status):
+        from zilliz_mcp_server.tools.zilliz.zilliz_tools import suspend_cluster
+        mock_client.control_plane_api_request.return_value = {"code": 0, "data": {"clusterId": "in01-x", "status": status}}
+        env = _envelope(asyncio.run(suspend_cluster("in01-x")))
+        assert env["data"]["confirm_required"] is False and status in env["data"]["message"]
+        assert env["next_steps"][0]["tool"] == "describe_cluster"
+        mock_client.control_plane_api_request.assert_called_once_with("/v2/clusters/in01-x", method="GET")
+
+
+class TestConfirmThroughMcp:
+    """confirm goes through the MCP argument model, which must not coerce strings or ints to True."""
+
+    def _call(self, name, args):
+        from zilliz_mcp_server.app import zilliz_mcp
+        from zilliz_mcp_server.tools.zilliz import zilliz_tools  # noqa: F401  (registers tools)
+        from zilliz_mcp_server.tools.milvus import milvus_tools  # noqa: F401
+        return asyncio.run(zilliz_mcp.call_tool(name, args))
+
+    @pytest.mark.parametrize("value", ["yes", "1", 1, "True "])
+    def test_non_boolean_confirm_rejected_before_any_request(self, value):
+        with patch('zilliz_mcp_server.tools.zilliz.zilliz_tools.openapi_client') as cp, \
+             patch('zilliz_mcp_server.tools.milvus.milvus_tools.openapi_client') as dp:
+            with pytest.raises(Exception, match="confirm"):
+                self._call("suspend_cluster", {"cluster_id": "in01-x", "confirm": value})
+            with pytest.raises(Exception, match="confirm"):
+                self._call("delete_entities", {**TestDeleteConfirm.ARGS, "confirm": value})
+            cp.control_plane_api_request.assert_not_called()
+            dp.data_plane_api_request.assert_not_called()
+
+    def test_boolean_true_executes(self):
+        with patch('zilliz_mcp_server.tools.zilliz.zilliz_tools.openapi_client') as cp:
+            cp.control_plane_api_request.return_value = {"code": 0, "data": {"clusterId": "in01-x"}}
+            self._call("suspend_cluster", {"cluster_id": "in01-x", "confirm": True})
+            cp.control_plane_api_request.assert_called_once_with("/v2/clusters/in01-x/suspend", method="POST")
+
+    def test_omitted_confirm_previews(self):
+        with patch('zilliz_mcp_server.tools.zilliz.zilliz_tools.openapi_client') as cp:
+            cp.control_plane_api_request.return_value = {"code": 0, "data": {"status": "RUNNING"}}
+            self._call("suspend_cluster", {"cluster_id": "in01-x"})
+            assert cp.control_plane_api_request.call_args.kwargs["method"] == "GET"
