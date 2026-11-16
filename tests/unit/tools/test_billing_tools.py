@@ -272,8 +272,8 @@ class TestQueryDailyUsage:
     async def test_range_cap(self, mock_client):
         from zilliz_mcp_server.tools.zilliz.billing_tools import query_daily_usage
 
-        with pytest.raises(Exception, match="7 days"):
-            await query_daily_usage("2026-09-10", "2026-09-17")
+        with pytest.raises(Exception, match="31 days"):
+            await query_daily_usage("2026-09-01", "2026-10-02")
         mock_client.control_plane_api_request.assert_not_called()
 
 

@@ -7,6 +7,7 @@ List Invoices needs both pageSize and currentPage, otherwise code 20011.
 
 import asyncio
 import json
+from datetime import date, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -35,8 +36,10 @@ def _usage(days=2, per_day=400):
     results = []
     for d in range(days):
         items = [_real_item(i, ("backup", "storage", "compute")[i % 3]) for i in range(per_day)]
-        results.append({"intervalStart": f"2026-11-{d + 1:02d}T00:00:00Z",
-                        "intervalEnd": f"2026-11-{d + 2:02d}T00:00:00Z",
+        day = date(2026, 10, 1) + timedelta(days=d)
+        items[0]["amount"] += d  # make daily totals differ so amount order != date order
+        results.append({"intervalStart": f"{day}T00:00:00Z",
+                        "intervalEnd": f"{day + timedelta(days=1)}T00:00:00Z",
                         "total": sum(it["amount"] for it in items), "currency": "USD", "items": items})
     return {"code": 0, "data": {"results": results}}
 
@@ -79,6 +82,22 @@ class TestUsageSize:
         with pytest.raises(StructuredToolError, match="limit must be"):
             _call("get_usage_summary", start="2026-11-01", end="2026-11-01", limit=0)
         mock_client.control_plane_api_request.assert_not_called()
+
+    def test_summary_by_day_returns_every_day_in_date_order(self, mock_client):
+        # "How much did we spend each day last month?" must not be cut to the top 20 days.
+        mock_client.control_plane_api_request.return_value = _usage(days=31, per_day=30)
+        s = json.loads(_call("get_usage_summary", start="2026-10-01", end="2026-10-31",
+                             group_by="day"))["data"]
+        keys = [g["key"] for g in s["groups"]]
+        assert len(keys) == 31 and keys == sorted(keys) and "other" not in keys
+        assert keys[0] == "2026-10-01" and keys[-1] == "2026-10-31"
+
+    def test_daily_without_filter_covers_a_month(self, mock_client):
+        mock_client.control_plane_api_request.return_value = _usage(days=31)
+        out = _call("query_daily_usage", start="2026-10-01", end="2026-10-31")
+        days = json.loads(out)["data"]
+        assert [d["day"] for d in days][::30] == ["2026-10-01", "2026-10-31"]
+        assert len(out) < 12000
 
 
 @patch('zilliz_mcp_server.tools.zilliz.billing_tools.openapi_client')
