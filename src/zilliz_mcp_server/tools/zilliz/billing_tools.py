@@ -156,6 +156,8 @@ async def get_usage_summary(
         end: Last day of the range in YYYY-MM-DD format (UTC, inclusive). Maximum range is 366 days.
         group_by: How to group costs: "cluster", "project", "cost_type", "region", "day" or "month" (default: "cluster").
                   For ranges over 92 days prefer "month"; "day" then leaves out each day's by_cost_type.
+                  Month groups only cover days inside start..end, so the first and last month
+                  are partial unless the range starts on the 1st / ends on the last day of a month.
         cluster_id: Only include usage for this cluster (optional)
         project_id: Only include usage for this project (optional)
         limit: Maximum number of groups to return (default 20, max 200). Smaller groups are
