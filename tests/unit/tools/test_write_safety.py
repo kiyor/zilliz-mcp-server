@@ -139,7 +139,7 @@ class TestConfirmThroughMcp:
         from zilliz_mcp_server.tools.milvus import milvus_tools  # noqa: F401
         return asyncio.run(zilliz_mcp.call_tool(name, args))
 
-    @pytest.mark.parametrize("value", ["yes", "1", 1, "True "])
+    @pytest.mark.parametrize("value", ["yes", "1", 1, "True ", "true"])
     def test_non_boolean_confirm_rejected_before_any_request(self, value):
         with patch('zilliz_mcp_server.tools.zilliz.zilliz_tools.openapi_client') as cp, \
              patch('zilliz_mcp_server.tools.milvus.milvus_tools.openapi_client') as dp:
