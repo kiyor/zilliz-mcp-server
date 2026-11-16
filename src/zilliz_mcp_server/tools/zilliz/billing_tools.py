@@ -25,6 +25,15 @@ MAX_INVOICE_PAGE_SIZE = 100
 # List Invoices returns this business code ("An unknown error occurred") when pageSize or
 # currentPage is missing.
 INVOICE_UNKNOWN_ERROR_CODE = 20011
+# Earliest day the usage API serves. Observed: ranges starting on or after this day return daily
+# usage; ranges that start earlier fail with code 3 ("Bad request", no detail) or come back empty.
+# Invoices go back further, so older months are answered from list_invoices.
+EARLIEST_USAGE_DATE = date(2025, 3, 1)
+USAGE_BAD_REQUEST_CODE = 3
+
+
+class UsageRangeError(ValueError):
+    """start is earlier than the usage API serves."""
 
 UNATTRIBUTED = "unattributed"
 
@@ -82,7 +91,44 @@ def _parse_range(start: str, end: str, max_days: int) -> tuple:
     days = (end_date - start_date).days + 1
     if days > max_days:
         raise ValueError(f"date range is {days} days; the maximum is {max_days} days")
+    if start_date < EARLIEST_USAGE_DATE:
+        raise UsageRangeError(
+            f"start {start_date} is before {EARLIEST_USAGE_DATE}, the earliest day the usage API serves "
+            f"(earlier ranges fail with 'Bad request'). Usage can be queried from "
+            f"{EARLIEST_USAGE_DATE} to today; use list_invoices for earlier months.")
     return start_date, end_date
+
+
+def usage_tool_error(tool: str, exc: Exception, ctx: Dict[str, Any]) -> hints.StructuredToolError:
+    """tool_error for usage tools, with the date boundary spelled out for range errors.
+
+    Covers the local check and the server's bare 'Bad request' (code 3) on an out-of-range start.
+    ctx must hold the start/end argument names used by the tool (start/end or base_*/target_*).
+    """
+    structured = hints.tool_error(tool, exc, ctx)
+    is_range = isinstance(exc, UsageRangeError) or getattr(exc, 'code', None) == USAGE_BAD_REQUEST_CODE
+    if not is_range:
+        return structured
+    starts = {k: v for k, v in ctx.items() if k.endswith('start') and isinstance(v, str)}
+    early = {k: v for k, v in starts.items() if v[:10] < EARLIEST_USAGE_DATE.isoformat()}
+    if not early and not isinstance(exc, UsageRangeError):
+        return structured  # Bad request for some other reason: keep the generic error.
+    field = next(iter(early), 'start')
+    retry = {**ctx, **{k: EARLIEST_USAGE_DATE.isoformat() for k in early}}
+    steps = []
+    if all(str(retry.get(k.replace('start', 'end'), '9999')) >= EARLIEST_USAGE_DATE.isoformat() for k in early):
+        steps.append(hints.step(tool, f"Retry with start moved to {EARLIEST_USAGE_DATE}.", **retry))
+    steps.append(hints.step('list_invoices', 'Invoices cover months before the usage data starts.',
+                            page_size=24, current_page=1))
+    payload = {**structured.payload, 'error': 'INVALID_ARGUMENT', 'field': field,
+               'expected': f"a date on or after {EARLIEST_USAGE_DATE}", 'got': early.get(field),
+               'fix': (f"Usage data is available from {EARLIEST_USAGE_DATE} onward. Move {field} to "
+                       f"{EARLIEST_USAGE_DATE} or later; for earlier months, read invoiced totals with "
+                       f"list_invoices and tell the user daily usage is not available that far back."),
+               'next_steps': steps}
+    if isinstance(exc, UsageRangeError):
+        payload['message'] = str(exc)
+    return hints.StructuredToolError({k: v for k, v in payload.items() if v not in (None, "", [], {})})
 
 
 def _fetch_usage(start: str, end: str, max_days: int) -> List[Dict[str, Any]]:
@@ -152,7 +198,8 @@ async def get_usage_summary(
     possible billing data issue to confirm with Zilliz support rather than explaining it.
 
     Args:
-        start: First day of the range in YYYY-MM-DD format (UTC)
+        start: First day of the range in YYYY-MM-DD format (UTC); usage data starts 2025-03-01
+            (earlier months: use list_invoices)
         end: Last day of the range in YYYY-MM-DD format (UTC, inclusive). Maximum range is 366 days.
         group_by: How to group costs: "cluster", "project", "cost_type", "region", "day" or "month" (default: "cluster").
                   For ranges over 92 days prefer "month"; "day" then leaves out each day's by_cost_type.
@@ -283,7 +330,7 @@ async def get_usage_summary(
 
     except Exception as e:
         logger.error(f"GET_USAGE_SUMMARY ERROR: {str(e)}")
-        raise hints.tool_error("get_usage_summary", e,
+        raise usage_tool_error("get_usage_summary", e,
                                {'start': start, 'end': end, 'group_by': group_by,
                                 'cluster_id': cluster_id, 'project_id': project_id}) from e
 
@@ -317,7 +364,8 @@ async def query_daily_usage(
     possible billing data issue to confirm with Zilliz support rather than explaining it.
 
     Args:
-        start: First day of the range in YYYY-MM-DD format (UTC)
+        start: First day of the range in YYYY-MM-DD format (UTC); usage data starts 2025-03-01
+            (earlier months: use list_invoices)
         end: Last day of the range in YYYY-MM-DD format (UTC, inclusive). Maximum range is 31 days.
         cluster_id: Only include line items for this cluster (optional)
         project_id: Only include line items for this project (optional)
@@ -398,7 +446,7 @@ async def query_daily_usage(
 
     except Exception as e:
         logger.error(f"QUERY_DAILY_USAGE ERROR: {str(e)}")
-        raise hints.tool_error("query_daily_usage", e,
+        raise usage_tool_error("query_daily_usage", e,
                                {'start': start, 'end': end, 'cluster_id': cluster_id,
                                 'project_id': project_id}) from e
 
