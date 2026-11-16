@@ -49,8 +49,8 @@ def list_clusters(clusters: List[Dict[str, Any]], page_size: int, current_page: 
     if not clusters:
         if current_page > 1:
             return [], ["No clusters on this page; earlier pages hold all results."]
-        return [step("list_projects", "Get a project_id, then call create_free_cluster(cluster_name, project_id).")], \
-            ["No clusters visible to this API key."]
+        return [], ["No clusters visible to this API key. If the user expects clusters, the key may belong to "
+                    "another organization or project; do not create a cluster unless the user asks."]
     if len(clusters) >= page_size:
         steps.append(step("list_clusters", "This page is full; there may be more clusters.",
                           page_size=page_size, current_page=current_page + 1))

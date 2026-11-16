@@ -21,6 +21,10 @@ async def list_projects() -> str:
     Args:
         None
     Returns:
+        JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
+        next_steps/notes are present only when useful. On failure the error text is JSON
+        {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
+        <result>:
         JSON string containing the API response with projects data
         Example:
         '[{"project_name": "Default Project", "project_id": "proj-f5b02814db7ccfe2d16293", "instance_count": 0, "create_time": "2023-06-14T06:59:07Z"}]'
@@ -64,6 +68,10 @@ async def list_clusters(page_size: int = 10, current_page: int = 1) -> str:
         page_size: The number of records to include in each response (default: 10)
         current_page: The current page number (default: 1)
     Returns:
+        JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
+        next_steps/notes are present only when useful. On failure the error text is JSON
+        {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
+        <result>:
         List containing cluster data
         Example:
         [
@@ -135,6 +143,10 @@ async def create_free_cluster(cluster_name: str, project_id: str) -> str:
         cluster_name: Name of the cluster to create
         project_id: ID of the project to which the cluster belongs
     Returns:
+        JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
+        next_steps/notes are present only when useful. On failure the error text is JSON
+        {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
+        <result>:
         Dict containing cluster creation info
         Example:
         {
@@ -189,6 +201,10 @@ async def describe_cluster(cluster_id: str) -> str:
     Args:
         cluster_id: ID of the cluster whose details are to return
     Returns:
+        JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
+        next_steps/notes are present only when useful. On failure the error text is JSON
+        {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
+        <result>:
         Dict containing detailed cluster information
         Example:
         {
@@ -256,6 +272,10 @@ async def suspend_cluster(cluster_id: str) -> str:
     Args:
         cluster_id: ID of the cluster to suspend
     Returns:
+        JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
+        next_steps/notes are present only when useful. On failure the error text is JSON
+        {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
+        <result>:
         Dict containing cluster suspension info
         Example:
         {
@@ -297,6 +317,10 @@ async def resume_cluster(cluster_id: str) -> str:
     Args:
         cluster_id: ID of the cluster to resume
     Returns:
+        JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
+        next_steps/notes are present only when useful. On failure the error text is JSON
+        {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
+        <result>:
         Dict containing cluster resumption info
         Example:
         {
@@ -382,10 +406,13 @@ async def query_cluster_metrics(
                 * ENTITIES_COUNT - Total entity count
             - stat: Statistical method (AVG for average, P99 for 99th percentile - P99 only valid for latency metrics)
     Returns:
+        JSON {"data": <result>, "next_steps": [{"tool", "args", "why"}], "notes": [...]};
+        next_steps/notes are present only when useful. On failure the error text is JSON
+        {"error", "message", "field", "expected", "got", "fix", "next_steps"}.
+        <result>:
         Dict containing cluster metrics data
-        Example:
+        Example (full envelope, hints omitted):
         {
-            "code": 0,
             "data": {
                 "results": [
                     {

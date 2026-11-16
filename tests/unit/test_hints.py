@@ -77,7 +77,17 @@ class TestClassifyError:
         e = ZillizAPIError("dimension: 1024, but length of []float: 768: actual=[[" + "0.1, " * 800 + "]]", code=1801)
         p = classify_error("search", e, {})
         assert p["error"] == "DIMENSION_MISMATCH"
-        assert len(p["message"]) <= hints.MAX_MESSAGE_CHARS + len("...(truncated)")
+        assert len(p["message"]) <= hints.MAX_MESSAGE_CHARS + len(" ...(truncated)... ")
+        assert p["message"].endswith("]]")  # tail kept
+
+    def test_401_with_denied_text_is_auth_failed(self):
+        e = requests.exceptions.HTTPError("401")
+        e.http_status, e.api_message = 401, "access denied"
+        assert classify_error("x", e)["error"] == "AUTH_FAILED"
+
+    def test_list_clusters_empty_does_not_suggest_create(self):
+        steps, notes = ns.list_clusters([], page_size=10, current_page=1)
+        assert steps == [] and notes
 
     @pytest.mark.parametrize("msg,code,status", [
         ("The apikey is illegal", 21119, 401),
@@ -115,6 +125,11 @@ class TestClassifyError:
     def test_unknown_keeps_message(self):
         p = classify_error("x", Exception("weird"))
         assert p["error"] == "INTERNAL_ERROR" and p["message"] == "weird"
+
+    def test_local_value_error_not_truncated(self):
+        msg = "Unknown metric name 'X'. Valid metric names: " + ", ".join(f"M{i}" for i in range(200))
+        p = classify_error("query_cluster_metrics", ValueError(msg))
+        assert p["error"] == "INVALID_ARGUMENT" and p["message"] == msg
 
 
 class TestNextSteps:

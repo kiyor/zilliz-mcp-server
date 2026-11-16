@@ -145,12 +145,16 @@ def classify_error(tool: str, exc: Exception, ctx: Optional[Dict[str, Any]] = No
 
     def build(kind: str, **kw: Any) -> Dict[str, Any]:
         # Server messages can echo the whole request (e.g. every float of a query vector).
-        short = message if len(message) <= MAX_MESSAGE_CHARS else message[:MAX_MESSAGE_CHARS] + "...(truncated)"
+        # Keep head + tail: the actual cause can follow the echoed payload.
+        # Local validation messages (ValueError) are ours and may list valid choices: never cut them.
+        short = message if (len(message) <= MAX_MESSAGE_CHARS or isinstance(exc, ValueError)) else (
+            message[:200] + " ...(truncated)... " + message[-100:])
         return _clean({"error": kind, "message": short, **kw})
 
     # --- authentication / authorization -------------------------------------
-    if http_status == 403 or code == _CODE_MISSING_ACL or "missing acl permission" in low \
-            or "permission" in low or "denied" in low:
+    is_401 = http_status == 401 or code in (21119, 1800)
+    if not is_401 and (http_status == 403 or code == _CODE_MISSING_ACL or "missing acl permission" in low
+                       or "permission denied" in low):
         acl = _ACL_RE.search(message)
         resource, action = (acl.group(1), acl.group(2)) if acl else (None, None)
         return build(
@@ -162,6 +166,7 @@ def classify_error(tool: str, exc: Exception, ctx: Optional[Dict[str, Any]] = No
             fix=_permission_fix(resource, action),
             missing_permission=f"{resource}:{action}" if acl else None,
             who_can_grant=_who_grants(resource),
+            required_role=_role_needed(resource, action),
             message_for_admin=_admin_message(tool, resource, action),
             next_steps=[step(tool, "Retry the same call (same arguments) once the permission is granted.",
                              **_clean(ctx))],
@@ -282,6 +287,8 @@ def classify_error(tool: str, exc: Exception, ctx: Optional[Dict[str, Any]] = No
             next_steps=[step("describe_cluster", "Check cluster status.", cluster_id=cluster_id)] if cluster_id else [],
         )
 
+    if isinstance(exc, ValueError):
+        return build("INVALID_ARGUMENT", fix="Read 'message'; it names the argument and the accepted values.")
     return build("API_ERROR" if code is not None or http_status else "INTERNAL_ERROR",
                  fix="Read 'message'; correct the argument it names and retry.")
 
