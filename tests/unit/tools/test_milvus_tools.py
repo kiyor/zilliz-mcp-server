@@ -69,7 +69,7 @@ class TestListDatabases:
         }
         
         result = await list_databases("cluster1", "region1")
-        result_data = json.loads(result)
+        result_data = json.loads(result)["data"]
         
         assert result_data == ["default", "test_db"]
         mock_client.data_plane_api_request.assert_called_once_with(
@@ -87,7 +87,7 @@ class TestListDatabases:
         
         mock_client.data_plane_api_request.side_effect = Exception("Connection failed")
         
-        with pytest.raises(Exception, match="Failed to list databases: Connection failed"):
+        with pytest.raises(Exception, match="Connection failed"):
             await list_databases("cluster1", "region1")
 
 
@@ -105,7 +105,7 @@ class TestListCollections:
         }
         
         result = await list_collections("cluster1", "region1", "test_db")
-        result_data = json.loads(result)
+        result_data = json.loads(result)["data"]
         
         assert result_data == ["collection1", "collection2"]
         mock_client.data_plane_api_request.assert_called_once_with(
@@ -154,8 +154,8 @@ class TestCreateCollection:
             dimension=128
         )
         
-        result_data = json.loads(result)
-        assert result_data == {"code": 0, "data": {}}
+        result_data = json.loads(result)["data"]
+        assert result_data == {}
         
         expected_body = {
             "collectionName": "test_collection",
@@ -243,8 +243,8 @@ class TestDescribeCollection:
             collection_name="test_collection"
         )
         
-        result_data = json.loads(result)
-        assert result_data == sample_collection_response
+        result_data = json.loads(result)["data"]
+        assert result_data == sample_collection_response["data"]
         
         expected_body = {"collectionName": "test_collection"}
         mock_client.data_plane_api_request.assert_called_once_with(
@@ -281,9 +281,9 @@ class TestInsertEntities:
             data=test_data
         )
         
-        result_data = json.loads(result)
-        assert result_data["data"]["insertCount"] == 2
-        assert result_data["data"]["insertIds"] == [1, 2]
+        result_data = json.loads(result)["data"]
+        assert result_data["insertCount"] == 2
+        assert result_data["insertIds"] == [1, 2]
         
         expected_body = {
             "collectionName": "test_collection",
@@ -348,8 +348,8 @@ class TestSearch:
             limit=10
         )
         
-        result_data = json.loads(result)
-        assert len(result_data["data"]) == 2
+        result_data = json.loads(result)["data"]
+        assert len(result_data) == 2
         
         expected_body = {
             "collectionName": "test_collection",
@@ -417,8 +417,8 @@ class TestQuery:
             filter="id > 0"
         )
         
-        result_data = json.loads(result)
-        assert len(result_data["data"]) == 2
+        result_data = json.loads(result)["data"]
+        assert len(result_data) == 2
         
         expected_body = {
             "collectionName": "test_collection",
@@ -480,8 +480,8 @@ class TestDeleteEntities:
             filter="id in [1, 2, 3]"
         )
         
-        result_data = json.loads(result)
-        assert result_data["code"] == 0
+        result_data = json.loads(result)["data"]
+        assert result_data == {}
         
         expected_body = {
             "collectionName": "test_collection",
@@ -580,8 +580,8 @@ class TestHybridSearch:
             limit=10
         )
         
-        result_data = json.loads(result)
-        assert result_data == mock_response
+        result_data = json.loads(result)["data"]
+        assert result_data == mock_response["data"]
         
         expected_body = {
             "collectionName": "test_collection",
@@ -641,8 +641,8 @@ class TestHybridSearch:
             consistency_level="Strong"
         )
         
-        result_data = json.loads(result)
-        assert result_data == mock_response
+        result_data = json.loads(result)["data"]
+        assert result_data == mock_response["data"]
         
         expected_body = {
             "collectionName": "test_collection",
@@ -701,9 +701,9 @@ class TestHybridSearch:
             limit=5
         )
         
-        result_data = json.loads(result)
-        assert result_data == mock_response
-        assert len(result_data["data"]) == 1
+        result_data = json.loads(result)["data"]
+        assert result_data == mock_response["data"]
+        assert len(result_data) == 1
 
     @patch('zilliz_mcp_server.tools.milvus.milvus_tools.openapi_client')
     async def test_hybrid_search_empty_results(self, mock_client):
@@ -736,9 +736,9 @@ class TestHybridSearch:
             limit=10
         )
         
-        result_data = json.loads(result)
-        assert result_data == mock_response
-        assert len(result_data["data"]) == 0
+        result_data = json.loads(result)["data"]
+        assert result_data == mock_response["data"]
+        assert len(result_data) == 0
 
     @patch('zilliz_mcp_server.tools.milvus.milvus_tools.openapi_client')
     async def test_hybrid_search_api_error(self, mock_client):
@@ -755,7 +755,7 @@ class TestHybridSearch:
             }
         ]
         
-        with pytest.raises(Exception, match="Failed to perform hybrid search: Connection failed"):
+        with pytest.raises(Exception, match="Connection failed"):
             await hybrid_search(
                 cluster_id="cluster1",
                 region_id="region1",
@@ -810,9 +810,9 @@ class TestHybridSearch:
             limit=10
         )
         
-        result_data = json.loads(result)
-        assert result_data == mock_response
-        assert len(result_data["data"]) == 2
+        result_data = json.loads(result)["data"]
+        assert result_data == mock_response["data"]
+        assert len(result_data) == 2
 
     @patch('zilliz_mcp_server.tools.milvus.milvus_tools.openapi_client')
     async def test_hybrid_search_with_grouping_field(self, mock_client):
@@ -853,8 +853,8 @@ class TestHybridSearch:
             output_fields=["id", "category", "title"]
         )
         
-        result_data = json.loads(result)
-        assert result_data == mock_response
+        result_data = json.loads(result)["data"]
+        assert result_data == mock_response["data"]
         
         expected_body = {
             "collectionName": "test_collection",

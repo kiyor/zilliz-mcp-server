@@ -3,6 +3,8 @@ import json
 import logging
 from typing import Dict, Any, List, Optional, Union
 from zilliz_mcp_server.common import openapi_client
+from zilliz_mcp_server.common import hints
+from zilliz_mcp_server.common import next_steps as ns
 from zilliz_mcp_server.settings import config
 from zilliz_mcp_server.app import zilliz_mcp
 
@@ -49,11 +51,11 @@ async def list_databases(cluster_id: str, region_id: str) -> str:
         # Log results
         logger.info(f"LIST_DATABASES RESULT: {databases}")
         
-        return json.dumps(databases)
+        return hints.ok(databases, *ns.list_databases(databases, cluster_id, region_id))
         
     except Exception as e:
         logger.error(f"LIST_DATABASES ERROR: {str(e)}")
-        raise Exception(f"Failed to list databases: {str(e)}") from e
+        raise hints.tool_error("list_databases", e, {"cluster_id": cluster_id, "region_id": region_id}) from e
 
 
 @zilliz_mcp.tool()
@@ -92,17 +94,15 @@ async def list_collections(cluster_id: str, region_id: str, db_name: str = "") -
         # Extract collection names from response
         collections = response.get('data', [])
         
-        # Serialize to JSON string
-        collections_json = json.dumps(collections)
-        
         # Log results
         logger.info(f"LIST_COLLECTIONS RESULT: {collections}")
         
-        return collections_json
+        return hints.ok(collections, *ns.list_collections(collections, cluster_id, region_id, db_name))
         
     except Exception as e:
         logger.error(f"LIST_COLLECTIONS ERROR: {str(e)}")
-        raise Exception(f"Failed to list collections: {str(e)}") from e
+        raise hints.tool_error("list_collections", e,
+                               {"cluster_id": cluster_id, "region_id": region_id, "db_name": db_name}) from e
 
 
 @zilliz_mcp.tool()
@@ -177,11 +177,15 @@ async def create_collection(
         # Log results
         logger.info(f"CREATE_COLLECTION RESULT: collection created successfully")
         
-        return json.dumps(response)
+        return hints.ok(response.get('data', {}), *ns.create_collection(
+            cluster_id, region_id, db_name, collection_name, dimension, auto_id,
+            primary_field_name, vector_field_name))
         
     except Exception as e:
         logger.error(f"CREATE_COLLECTION ERROR: {str(e)}")
-        raise Exception(f"Failed to create collection: {str(e)}") from e
+        raise hints.tool_error("create_collection", e, {
+            "cluster_id": cluster_id, "region_id": region_id, "db_name": db_name,
+            "collection_name": collection_name}) from e
 
 
 @zilliz_mcp.tool()
@@ -278,11 +282,13 @@ async def describe_collection(
         fields_count = len(data.get('fields', []))
         logger.info(f"DESCRIBE_COLLECTION RESULT: {fields_count} fields found")
         
-        return json.dumps(response)
+        return hints.ok(data, *ns.describe_collection(data, cluster_id, region_id, db_name))
         
     except Exception as e:
         logger.error(f"DESCRIBE_COLLECTION ERROR: {str(e)}")
-        raise Exception(f"Failed to describe collection: {str(e)}") from e
+        raise hints.tool_error("describe_collection", e, {
+            "cluster_id": cluster_id, "region_id": region_id, "db_name": db_name,
+            "collection_name": collection_name}) from e
 
 
 @zilliz_mcp.tool()
@@ -342,11 +348,13 @@ async def insert_entities(
         insert_count = response_data.get('insertCount', 0)
         logger.info(f"INSERT_ENTITIES RESULT: {insert_count} entities inserted")
         
-        return json.dumps(response)
+        return hints.ok(response_data, *ns.insert_entities(response_data, data_count))
         
     except Exception as e:
         logger.error(f"INSERT_ENTITIES ERROR: {str(e)}")
-        raise Exception(f"Failed to insert data: {str(e)}") from e
+        raise hints.tool_error("insert_entities", e, {
+            "cluster_id": cluster_id, "region_id": region_id, "db_name": db_name,
+            "collection_name": collection_name}) from e
 
 
 @zilliz_mcp.tool()
@@ -407,11 +415,14 @@ async def delete_entities(
         # Log results
         logger.info(f"DELETE_ENTITIES RESULT: deletion completed")
         
-        return json.dumps(response)
+        return hints.ok(response.get('data', {}), *ns.delete_entities(
+            cluster_id, region_id, db_name, collection_name, filter))
         
     except Exception as e:
         logger.error(f"DELETE_ENTITIES ERROR: {str(e)}")
-        raise Exception(f"Failed to delete entities: {str(e)}") from e
+        raise hints.tool_error("delete_entities", e, {
+            "cluster_id": cluster_id, "region_id": region_id, "db_name": db_name,
+            "collection_name": collection_name, "filter": filter}) from e
 
 
 @zilliz_mcp.tool()
@@ -534,11 +545,14 @@ async def search(
         results_count = len(results)
         logger.info(f"SEARCH RESULT: {results_count} results found")
         
-        return json.dumps(response)
+        return hints.ok(results, *ns.search(results, cluster_id, region_id, db_name, collection_name,
+                                            filter, output_fields))
         
     except Exception as e:
         logger.error(f"SEARCH ERROR: {str(e)}")
-        raise Exception(f"Failed to search entities: {str(e)}") from e
+        raise hints.tool_error("search", e, {
+            "cluster_id": cluster_id, "region_id": region_id, "db_name": db_name,
+            "collection_name": collection_name, "anns_field": anns_field, "filter": filter}) from e
 
 
 @zilliz_mcp.tool()
@@ -630,11 +644,14 @@ async def query(
         results_count = len(results)
         logger.info(f"QUERY RESULT: {results_count} entities found")
         
-        return json.dumps(response)
+        return hints.ok(results, *ns.query(results, cluster_id, region_id, db_name, collection_name,
+                                           filter, limit, offset, output_fields))
         
     except Exception as e:
         logger.error(f"QUERY ERROR: {str(e)}")
-        raise Exception(f"Failed to query entities: {str(e)}") from e
+        raise hints.tool_error("query", e, {
+            "cluster_id": cluster_id, "region_id": region_id, "db_name": db_name,
+            "collection_name": collection_name, "filter": filter}) from e
 
 
 @zilliz_mcp.tool()
@@ -738,11 +755,13 @@ async def hybrid_search(
         results_count = len(results)
         logger.info(f"HYBRID_SEARCH RESULT: {results_count} results found")
         
-        return json.dumps(response)
+        return hints.ok(results, *ns.hybrid_search(results))
         
     except Exception as e:
         logger.error(f"HYBRID_SEARCH ERROR: {str(e)}")
-        raise Exception(f"Failed to perform hybrid search: {str(e)}") from e
+        raise hints.tool_error("hybrid_search", e, {
+            "cluster_id": cluster_id, "region_id": region_id, "db_name": db_name,
+            "collection_name": collection_name}) from e
     
     
 

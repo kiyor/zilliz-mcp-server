@@ -4,6 +4,8 @@ import json
 import logging
 from typing import Dict, Any, List, Optional, Union
 from zilliz_mcp_server.common import openapi_client
+from zilliz_mcp_server.common import hints
+from zilliz_mcp_server.common import next_steps as ns
 from zilliz_mcp_server.settings import config
 from zilliz_mcp_server.app import zilliz_mcp
 
@@ -45,11 +47,11 @@ async def list_projects() -> str:
         # Log results
         logger.info(f"LIST_PROJECTS RESULT: found {len(formatted_projects)} projects")
         
-        return json.dumps(formatted_projects)
+        return hints.ok(formatted_projects, *ns.list_projects(formatted_projects))
         
     except Exception as e:
         logger.error(f"LIST_PROJECTS ERROR: {str(e)}")
-        raise Exception(f"Failed to get projects info: {str(e)}") from e
+        raise hints.tool_error("list_projects", e) from e
 
 
 @zilliz_mcp.tool()
@@ -118,11 +120,11 @@ async def list_clusters(page_size: int = 10, current_page: int = 1) -> str:
         # Log results
         logger.info(f"LIST_CLUSTERS RESULT: found {len(formatted_clusters)} clusters")
         
-        return json.dumps(formatted_clusters)
+        return hints.ok(formatted_clusters, *ns.list_clusters(formatted_clusters, page_size, current_page))
         
     except Exception as e:
         logger.error(f"LIST_CLUSTERS ERROR: {str(e)}")
-        raise Exception(f"Failed to list clusters: {str(e)}") from e
+        raise hints.tool_error("list_clusters", e) from e
 
 @zilliz_mcp.tool()
 async def create_free_cluster(cluster_name: str, project_id: str) -> str:
@@ -173,11 +175,11 @@ async def create_free_cluster(cluster_name: str, project_id: str) -> str:
         # Log results
         logger.info(f"CREATE_FREE_CLUSTER RESULT: cluster_id={cluster_info['cluster_id']}")
         
-        return json.dumps(cluster_info)
+        return hints.ok(cluster_info, *ns.create_free_cluster(cluster_info))
         
     except Exception as e:
         logger.error(f"CREATE_FREE_CLUSTER ERROR: {str(e)}")
-        raise Exception(f"Failed to create free cluster: {str(e)}") from e
+        raise hints.tool_error("create_free_cluster", e, {"project_id": project_id}) from e
 
 @zilliz_mcp.tool()
 async def describe_cluster(cluster_id: str) -> str:
@@ -240,11 +242,11 @@ async def describe_cluster(cluster_id: str) -> str:
         # Log results
         logger.info(f"DESCRIBE_CLUSTER RESULT: name={cluster_info['cluster_name']}, status={cluster_info['status']}")
         
-        return json.dumps(cluster_info)
+        return hints.ok(cluster_info, *ns.describe_cluster(cluster_info))
         
     except Exception as e:
         logger.error(f"DESCRIBE_CLUSTER ERROR: {str(e)}")
-        raise Exception(f"Failed to describe cluster: {str(e)}") from e
+        raise hints.tool_error("describe_cluster", e, {"cluster_id": cluster_id}) from e
 
 @zilliz_mcp.tool()
 async def suspend_cluster(cluster_id: str) -> str:
@@ -281,11 +283,11 @@ async def suspend_cluster(cluster_id: str) -> str:
         # Log results
         logger.info(f"SUSPEND_CLUSTER RESULT: cluster_id={cluster_info['cluster_id']}")
         
-        return json.dumps(cluster_info)
+        return hints.ok(cluster_info, *ns.cluster_state_change(cluster_info['cluster_id'], "SUSPENDED"))
         
     except Exception as e:
         logger.error(f"SUSPEND_CLUSTER ERROR: {str(e)}")
-        raise Exception(f"Failed to suspend cluster: {str(e)}") from e
+        raise hints.tool_error("suspend_cluster", e, {"cluster_id": cluster_id}) from e
 
 @zilliz_mcp.tool()
 async def resume_cluster(cluster_id: str) -> str:
@@ -322,11 +324,11 @@ async def resume_cluster(cluster_id: str) -> str:
         # Log results
         logger.info(f"RESUME_CLUSTER RESULT: cluster_id={cluster_info['cluster_id']}")
         
-        return json.dumps(cluster_info)
+        return hints.ok(cluster_info, *ns.cluster_state_change(cluster_info['cluster_id'], "RUNNING"))
         
     except Exception as e:
         logger.error(f"RESUME_CLUSTER ERROR: {str(e)}")
-        raise Exception(f"Failed to resume cluster: {str(e)}") from e
+        raise hints.tool_error("resume_cluster", e, {"cluster_id": cluster_id}) from e
 
 @zilliz_mcp.tool()
 async def query_cluster_metrics(
@@ -442,11 +444,12 @@ async def query_cluster_metrics(
         results = data.get('results', [])
         logger.info(f"QUERY_CLUSTER_METRICS RESULT: returned {len(results)} metric results")
         
-        return json.dumps(response)
+        return hints.ok(data, *ns.query_cluster_metrics(data, cluster_id))
         
     except Exception as e:
         logger.error(f"QUERY_CLUSTER_METRICS ERROR: {str(e)}")
-        raise Exception(f"Failed to query cluster metrics: {str(e)}") from e
+        raise hints.tool_error("query_cluster_metrics", e,
+                               {"cluster_id": cluster_id, "metric_queries": metric_queries}) from e
 
 
 
