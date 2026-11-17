@@ -7,9 +7,9 @@ This document describes the testing setup and coverage for the Zilliz MCP Server
 We've implemented a comprehensive unit testing suite that covers the core functionality of the Zilliz MCP Server. The tests focus on the most critical components to ensure reliability and correctness.
 
 ### ✅ Test Statistics
-- **Total Tests**: 118
-- **Test Modules**: 5 modules
-- **Coverage**: Core functionality (Settings, HTTP Client, API Tools, Billing Tools)
+- **Total Tests**: 351
+- **Test Modules**: 20 modules
+- **Coverage**: Settings, HTTP client, result/error protocol, cluster and data tools, metrics, diagnostics, billing, write safety
 - **Framework**: pytest with asyncio support
 
 ## 🧪 Test Structure
@@ -23,11 +23,26 @@ tests/
 │   ├── __init__.py
 │   ├── test_settings.py     # Configuration validation tests (12 tests)
 │   ├── test_openapi_client.py  # HTTP client tests (40 tests)
+│   ├── test_hints.py        # Result envelope, error classification, next-step hints (32 tests)
+│   ├── test_permission_message.py  # PERMISSION_DENIED key order and relayable message (6 tests)
 │   └── tools/
 │       ├── __init__.py
 │       ├── test_zilliz_tools.py    # Zilliz Cloud API tests (19 tests)
-│       ├── test_milvus_tools.py    # Milvus data operations tests (23 tests)
-│       └── test_billing_tools.py   # Billing usage and invoice tests (24 tests)
+│       ├── test_milvus_tools.py    # Milvus data operations tests (24 tests)
+│       ├── test_metrics_correctness.py   # Metric names, stat validation, null labelling (21 tests)
+│       ├── test_metrics_granularity.py   # Coarse buckets, coverage hints, period check (27 tests)
+│       ├── test_metrics_budget.py        # Null runs and response-budget trimming (8 tests)
+│       ├── test_observability_caveats.py # CU_SIZE / REPLICA_COUNT, fail-rate caveats (10 tests)
+│       ├── test_diagnostics.py     # get_cluster_health (11 tests)
+│       ├── test_activity.py        # get_cluster_activity_history (14 tests)
+│       ├── test_result_budget.py   # Row trimming and default vector exclusion (14 tests)
+│       ├── test_docstring_audit.py # Tool descriptions match server limits and enums (5 tests)
+│       ├── test_write_safety.py    # Read-only mode, annotations, confirm step (21 tests)
+│       ├── test_billing_tools.py   # Billing usage and invoice tests (24 tests)
+│       ├── test_billing_permissions.py  # Billing permission errors (20 tests)
+│       ├── test_billing_date_range.py   # Usage date range handling (8 tests)
+│       ├── test_billing_real_shapes.py  # Real API response shapes (17 tests)
+│       └── test_billing_compare.py      # compare_billing_periods (18 tests)
 ```
 
 ## 🎯 Test Coverage
@@ -156,7 +171,7 @@ pytestmark = pytest.mark.asyncio
 
 ## 📊 Test Quality Metrics
 
-- **Fast Execution**: All 62 tests run in under 1 second
+- **Fast Execution**: All 351 tests run in a few seconds
 - **Isolated**: Each test is independent and can run alone
 - **Deterministic**: Tests produce consistent results
 - **Comprehensive**: Cover all critical code paths
