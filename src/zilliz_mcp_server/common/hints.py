@@ -153,8 +153,8 @@ def _permission_message(tool: str, resource: Optional[str], action: Optional[str
     act on them, so a model relaying only 'message' still passes all of them on. The server's own
     text comes last and is the only part subject to the length rule."""
     missing = f"the '{resource}:{action}' permission" if resource and action else f"the permission needed for {tool}"
-    return (f"The API key lacks {missing}. Who can grant it: {_who_grants(resource)} "
-            f"({_role_needed(resource, action)}). Where: Zilliz Cloud console; for a personal API key, Access "
+    return (f"The API key lacks {missing}. Who can grant it: {_who_grants(resource)}, by giving the key "
+            f"{_role_needed(resource, action)}. Where: Zilliz Cloud console; for a personal API key, Access "
             f"Control > Members > Edit Role; for a customized API key, the key's role under API Keys. Then retry: "
             f"{retry}. Message to forward to the admin: \"{admin_msg}\" (Server message: {server_msg})")
 
