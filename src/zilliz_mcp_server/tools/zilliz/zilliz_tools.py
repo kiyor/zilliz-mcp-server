@@ -7,6 +7,7 @@ from pydantic import StrictBool
 from zilliz_mcp_server.common import openapi_client
 from zilliz_mcp_server.common import hints
 from zilliz_mcp_server.common import next_steps as ns
+from zilliz_mcp_server.common.budget import RESULT_BUDGET
 from zilliz_mcp_server.settings import config
 from zilliz_mcp_server.app import zilliz_mcp, read_tool, write_tool
 from zilliz_mcp_server.tools.zilliz import metrics as metrics_catalog
@@ -575,15 +576,23 @@ async def query_cluster_metrics(
         summary = metrics_catalog.series_summary(results, granularity)
         caveat = metrics_catalog.fail_rate_caveat(results)
         # Hints above are computed on the full result; the output is compacted and, if still over
-        # the shared response budget, trimmed to the most recent buckets.
-        data['results'], trim = metrics_catalog.fit_results(results)
-        trim_steps, trim_notes = [], []
-        if trim:
-            st, tn = metrics_catalog.trim_hints(trim, cluster_id, metric_queries, granularity)
-            trim_steps, trim_notes = ([st] if st else []), [tn]
-        return hints.ok(data, cov_steps + trim_steps + steps,
-                        ([summary] if summary else []) + trim_notes + cov_notes
-                        + ([caveat] if caveat else []) + notes)
+        # the shared response budget, trimmed to the most recent buckets. The budget covers the
+        # whole output (notes + next_steps + data): shrink the results budget by any excess.
+        budget = RESULT_BUDGET
+        for _ in range(4):
+            data['results'], trim = metrics_catalog.fit_results(results, budget)
+            trim_steps, trim_notes = [], []
+            if trim:
+                st, tn = metrics_catalog.trim_hints(trim, cluster_id, metric_queries, granularity)
+                trim_steps, trim_notes = ([st] if st else []), [tn]
+            out = hints.ok(data, cov_steps + trim_steps + steps,
+                           ([summary] if summary else []) + trim_notes + cov_notes
+                           + ([caveat] if caveat else []) + notes)
+            excess = len(out.encode()) - RESULT_BUDGET
+            if excess <= 0:
+                break
+            budget -= excess + 100
+        return out
 
     except Exception as e:
         logger.error(f"QUERY_CLUSTER_METRICS ERROR: {str(e)}")

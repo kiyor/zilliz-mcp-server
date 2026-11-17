@@ -286,7 +286,12 @@ def fit_results(results: List[Dict[str, Any]], budget: int = RESULT_BUDGET):
 
 def trim_hints(info: Dict[str, Any], cluster_id: str, metric_queries: List[Dict[str, str]],
                granularity: str):
-    """(step, note) telling the model what fit_results cut and how to get the rest."""
+    """(step, note) telling the model what fit_results cut and how to get the rest.
+
+    The re-query uses end = first kept bucket. Observed: the metrics API treats end as exclusive and
+    lays buckets on the start's grid, so the re-query's last bucket is the one just before the kept
+    part (no overlap, no gap) when it starts at the original window start.
+    """
     note = (f"Values trimmed to fit the response size budget: each series shows its most recent "
             f"{info['kept']} of {info['total']} buckets (from {info['kept_from']}); the full result was "
             f"{info['bytes_total']:,} bytes of JSON and clients truncate long tool output. The per-series "
