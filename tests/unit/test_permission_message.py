@@ -53,6 +53,18 @@ def test_without_acl_detail_still_names_tool():
     assert "missing_permission" not in p
 
 
+def test_billing_tool_without_acl_detail_falls_back_to_billing_grant():
+    p = classify_error("list_invoices", APIError("permission denied", http_status=403), {})
+    assert p["who_can_grant"] == "an Organization Owner of the Zilliz Cloud organization"
+    assert p["required_role"].startswith("the Organization Billing Admin role")
+    assert "Project Admin" not in p["message"] and "Project Admin" not in p["fix"]
+    assert "Billing Admin" in p["message_for_admin"]
+    assert p["message"].startswith("The API key lacks the permission needed for list_invoices.")
+    assert "missing_permission" not in p
+    q = classify_error("describe_cluster", APIError("permission denied", http_status=403), {})
+    assert "Project Admin" in q["who_can_grant"]
+
+
 def test_tool_error_text_starts_with_relayable_fields():
     text = str(tool_error("list_invoices", APIError(ACL, code=96041), {"start": "2025-03-01"}))
     keys = list(json.loads(text))
