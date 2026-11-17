@@ -102,7 +102,11 @@ class TestPermissionDenied:
         mock_client.control_plane_api_request.side_effect = ZillizAPIError(ACL_ERROR + " x" * 400, code=96041)
         with pytest.raises(Exception) as e:
             _call("list_invoices")
-        assert len(_payload(e.value)["message"]) <= 320
+        msg = _payload(e.value)["message"]
+        # Only the server's text is cut (head + tail); the five user-facing points stay whole.
+        assert len(msg.split("(Server message: ", 1)[1]) <= 320
+        assert "...(truncated)..." in msg
+        assert "Then retry: list_invoices(" in msg and "Message to forward to the admin:" in msg
 
 
 class TestInvoiceDocsAndAmounts:
