@@ -26,11 +26,13 @@ def test_key_order_admin_message_and_retry_first():
 def test_message_carries_all_five_points_in_order():
     p = perm()
     m = p["message"]
-    parts = ["The API key lacks the 'billing:view' permission.",
-             "Who can grant it: an Organization Owner",
-             "Where: Zilliz Cloud console; for a personal API key, Access Control > Members > Edit Role",
-             'Then retry: list_invoices(start="2025-03-01").',
-             'Message to forward to the admin: "' + p["message_for_admin"] + '"']
+    parts = ["Reply to the user with all five points below, and include the admin message verbatim",
+             "1) The API key lacks the 'billing:view' permission.",
+             "2) Who can grant it: an Organization Owner",
+             "3) Where: Zilliz Cloud console; for a personal API key, Access Control > Members > Edit Role",
+             '4) Then retry: list_invoices(start="2025-03-01") (tell the user: once the permission is '
+             'granted, ask me to run list_invoices again).',
+             '5) Message to forward to the admin: "' + p["message_for_admin"] + '"']
     pos = [m.index(x) for x in parts]
     assert pos == sorted(pos) and pos[0] == 0
     assert m.endswith("(Server message: " + ACL + ")")
@@ -48,7 +50,7 @@ def test_long_server_message_cut_but_five_points_kept():
 
 def test_without_acl_detail_still_names_tool():
     p = classify_error("describe_cluster", APIError("permission denied", http_status=403), {"cluster_id": "in01-x"})
-    assert p["message"].startswith("The API key lacks the permission needed for describe_cluster.")
+    assert "1) The API key lacks the permission needed for describe_cluster." in p["message"]
     assert p["retry_after_grant"] == 'describe_cluster(cluster_id="in01-x")'
     assert "missing_permission" not in p
 
@@ -59,7 +61,7 @@ def test_billing_tool_without_acl_detail_falls_back_to_billing_grant():
     assert p["required_role"].startswith("the Organization Billing Admin role")
     assert "Project Admin" not in p["message"] and "Project Admin" not in p["fix"]
     assert "Billing Admin" in p["message_for_admin"]
-    assert p["message"].startswith("The API key lacks the permission needed for list_invoices.")
+    assert "1) The API key lacks the permission needed for list_invoices." in p["message"]
     assert "missing_permission" not in p
     q = classify_error("describe_cluster", APIError("permission denied", http_status=403), {})
     assert "Project Admin" in q["who_can_grant"]

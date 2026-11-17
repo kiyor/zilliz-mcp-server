@@ -154,12 +154,19 @@ def _permission_message(tool: str, resource: Optional[str], action: Optional[str
                         admin_msg: str, server_msg: str) -> str:
     """User-facing message for PERMISSION_DENIED: the five things the user needs, in the order they
     act on them, so a model relaying only 'message' still passes all of them on. The server's own
-    text comes last and is the only part subject to the length rule."""
+    text comes last and is the only part subject to the length rule. The first sentence tells the
+    agent to relay all five points and the admin message verbatim, which models otherwise paraphrase
+    or drop."""
     missing = f"the '{resource}:{action}' permission" if resource and action else f"the permission needed for {tool}"
-    return (f"The API key lacks {missing}. Who can grant it: {_who_grants(resource)}, by giving the key "
-            f"{_role_needed(resource, action)}. Where: Zilliz Cloud console; for a personal API key, Access "
-            f"Control > Members > Edit Role; for a customized API key, the key's role under API Keys. Then retry: "
-            f"{retry}. Message to forward to the admin: \"{admin_msg}\" (Server message: {server_msg})")
+    return (f"{_RELAY_INSTRUCTION} 1) The API key lacks {missing}. 2) Who can grant it: {_who_grants(resource)}, "
+            f"by giving the key {_role_needed(resource, action)}. 3) Where: Zilliz Cloud console; for a personal "
+            f"API key, Access Control > Members > Edit Role; for a customized API key, the key's role under API "
+            f"Keys. 4) Then retry: {retry} (tell the user: once the permission is granted, ask me to run {tool} "
+            f"again). 5) Message to forward to the admin: \"{admin_msg}\" (Server message: {server_msg})")
+
+
+_RELAY_INSTRUCTION = ("Reply to the user with all five points below, and include the admin message verbatim "
+                      "(translate it if the user writes in another language).")
 
 
 def classify_error(tool: str, exc: Exception, ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
