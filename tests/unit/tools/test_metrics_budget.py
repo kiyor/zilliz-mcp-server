@@ -61,3 +61,32 @@ class TestFitResults:
         assert "most recent 50 of 168 buckets" in note
         assert st["args"]["start"] == "2026-11-09T00:00:00Z" and st["args"]["end"] == "2026-11-14T22:00:00Z"
         assert st["args"]["granularity"] == "PT1H"
+
+    def test_requery_end_is_first_kept_bucket(self):
+        # The API's end is exclusive (observed), so end = first kept bucket neither overlaps nor gaps.
+        info = {"kept": 132, "total": 360, "bytes_total": 90000,
+                "window_start": "2026-11-16T10:00:00Z", "kept_from": "2026-11-16T13:48:00Z"}
+        st, _ = m.trim_hints(info, "c", [{"metricName": "A", "stat": "AVG"}], "PT1M")
+        assert st["args"]["end"] == "2026-11-16T13:48:00Z"
+
+
+class TestWholeOutputBudget:
+    def test_notes_and_steps_count_toward_budget(self, monkeypatch):
+        import asyncio
+        from unittest.mock import patch
+        from zilliz_mcp_server.common.budget import RESULT_BUDGET
+        from zilliz_mcp_server.tools.zilliz import zilliz_tools as zt
+        names = ["CU_CAPACITY", "CU_COMPUTATION", "STORAGE_USE", "CU_SIZE", "REPLICA_COUNT"]
+        names = [n for n in names if n in m.METRICS][:5]
+        series = [{"name": n, "stat": "AVG", "unit": "x",
+                   "values": pts([str(123456 + j) for j in range(360)])} for n in names]
+        # A long note pushes notes + next_steps over the margin left by a data-only budget.
+        monkeypatch.setattr(zt.ns, "query_cluster_metrics", lambda data, cid: ([], ["n" * 2500]))
+        with patch.object(zt.openapi_client, "control_plane_api_request",
+                          return_value={"code": 0, "data": {"results": series}}):
+            out = asyncio.run(zt.query_cluster_metrics(
+                cluster_id="in01-x", period="PT6H", granularity="PT1M",
+                metric_queries=[{"metricName": n, "stat": "AVG"} for n in names]))
+        assert len(out.encode()) <= RESULT_BUDGET
+        j = json.loads(out)
+        assert any("trimmed" in n for n in j["notes"])
