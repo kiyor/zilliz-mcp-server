@@ -23,6 +23,7 @@ def main():
         # only after we make the changes.
         from zilliz_mcp_server.app import zilliz_mcp
         from zilliz_mcp_server.tools.zilliz import zilliz_tools
+        from zilliz_mcp_server.tools.zilliz import diagnostics
         from zilliz_mcp_server.tools.milvus import milvus_tools
 
         print(f"📡 Using transport: {args.transport}")
