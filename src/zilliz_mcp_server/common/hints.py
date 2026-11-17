@@ -96,6 +96,9 @@ _ACL_RE = re.compile(r"resource=([\w-]+),\s*action=([\w-]+)")
 
 # API error code for "Missing ACL permission" (HTTP 200, body code 96041).
 _CODE_MISSING_ACL = 96041
+# Tools that read organization billing data. When the error carries no resource/action, who can
+# grant access is still known from the tool: billing is granted at organization level.
+_BILLING_TOOL_RE = re.compile(r"billing|invoice|usage")
 
 
 _WHERE_TO_GRANT = (
@@ -194,23 +197,24 @@ def classify_error(tool: str, exc: Exception, ctx: Optional[Dict[str, Any]] = No
                        or "permission denied" in low):
         acl = _ACL_RE.search(message)
         resource, action = (acl.group(1), acl.group(2)) if acl else (None, None)
+        grant = resource or ("billing" if _BILLING_TOOL_RE.search(tool) else None)
         retry = _call_repr(tool, ctx)
-        admin_msg = _admin_message(tool, resource, action)
+        admin_msg = _admin_message(tool, grant, action)
         # Key order matters: clients truncate and models relay the first keys. The message for the
         # admin and the retry call come right after 'error'; 'message' repeats all five points.
         return _clean(dict(
             error="PERMISSION_DENIED",
             message_for_admin=admin_msg,
             retry_after_grant=retry,
-            message=_permission_message(tool, resource, action, retry, admin_msg, short),
+            message=_permission_message(tool, grant, action, retry, admin_msg, short),
             missing_permission=f"{resource}:{action}" if acl else None,
-            who_can_grant=_who_grants(resource),
-            required_role=_role_needed(resource, action),
+            who_can_grant=_who_grants(grant),
+            required_role=_role_needed(grant, action),
             field="ZILLIZ_CLOUD_TOKEN",
             expected=f"an API key whose role allows '{action}' on '{resource}'" if acl
             else "an API key whose role allows this operation",
             got=f"resource={resource}, action={action}" if acl else None,
-            fix=_permission_fix(resource, action, tool, ctx),
+            fix=_permission_fix(grant, action, tool, ctx),
             next_steps=[step(tool, "Retry your previous call unchanged once the permission is granted "
                                    "(args lists only the identifying arguments).",
                              **_clean(ctx))],
